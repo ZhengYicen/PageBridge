@@ -1,35 +1,96 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api/client";
+import { api, Book } from "../api/client";
 
 export default function UploadPage() {
   const navigate = useNavigate();
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [books, setBooks] = useState<any[]>([]);
+  const [books, setBooks] = useState<Book[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [parsingIds, setParsingIds] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
-  const loaded = useRef(false);
 
-  // 页面加载时取书籍列表
-  if (!loaded.current) {
-    loaded.current = true;
-    api.listBooks().then((res) => setBooks(res.books)).catch(() => {});
+  // 加载书籍列表，用 useCallback 避免重复 fetch
+  const loadBooks = useCallback(async () => {
+    try {
+      const res = await api.listBooks();
+      setBooks(res.books);
+    } catch {
+      // 静默失败
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // 初始化加载
+  if (loading) {
+    loadBooks();
   }
 
+  // ── 上传 ──
   const handleUpload = async (file: File) => {
     setUploading(true);
     try {
       const result = await api.upload(file);
-      // 刷新列表
-      const res = await api.listBooks();
-      setBooks(res.books);
-      // 跳转到书籍详情
+      await loadBooks();
       navigate(`/books/${result.id}`);
     } catch (e: any) {
       alert("上传失败: " + e.message);
     } finally {
       setUploading(false);
     }
+  };
+
+  // ── 重新解析 ──
+  const handleReparse = async (bookId: string) => {
+    setParsingIds((prev) => new Set(prev).add(bookId));
+    try {
+      await api.parseBook(bookId);
+      await loadBooks();
+    } catch (e: any) {
+      alert("解析失败: " + e.message);
+      await loadBooks();
+    } finally {
+      setParsingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(bookId);
+        return next;
+      });
+    }
+  };
+
+  // ── 删除 ──
+  const handleDelete = async (book: Book) => {
+    if (!confirm(`确定删除「${book.title}」？\n关联的章节、翻译缓存和图片资源都会被清理。`)) {
+      return;
+    }
+    try {
+      await api.deleteBook(book.id);
+      setBooks((prev) => prev.filter((b) => b.id !== book.id));
+    } catch (e: any) {
+      alert("删除失败: " + e.message);
+    }
+  };
+
+  // ── 格式化时间 ──
+  const formatTime = (iso: string | undefined | null) => {
+    if (!iso) return "未知时间";
+    try {
+      const d = new Date(iso);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch {
+      return "未知时间";
+    }
+  };
+
+  // ── 解析状态配置 ──
+  const statusConfig: Record<string, { label: string; bg: string; text: string }> = {
+    pending:   { label: "未解析",  bg: "bg-gray-100", text: "text-gray-600" },
+    parsing:   { label: "解析中",  bg: "bg-yellow-100", text: "text-yellow-700" },
+    completed: { label: "已解析",  bg: "bg-green-100", text: "text-green-700" },
+    failed:    { label: "解析失败", bg: "bg-red-100", text: "text-red-600" },
   };
 
   const onDrop = (e: React.DragEvent) => {
@@ -75,36 +136,77 @@ export default function UploadPage() {
         <div>
           <h2 className="text-lg font-semibold mb-3">已上传的书籍</h2>
           <div className="grid gap-3">
-            {books.map((book) => (
-              <div
-                key={book.id}
-                className="bg-white rounded-xl p-4 shadow-sm border flex items-center gap-4 hover:shadow-md cursor-pointer"
-                onClick={() => navigate(`/books/${book.id}`)}
-              >
-                <span className="text-2xl">{book.format === "pdf" ? "📕" : "📘"}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium truncate">{book.title}</p>
-                  <p className="text-sm text-gray-400">
-                    {book.format.toUpperCase()} ·{" "}
-                    {book.parse_status === "completed"
-                      ? `${book.total_chapters} 章`
-                      : book.parse_status === "parsing"
-                      ? "解析中..."
-                      : "待解析"}
-                  </p>
+            {books.map((book) => {
+              const isParsing = parsingIds.has(book.id) || book.parse_status === "parsing";
+              const status = statusConfig[book.parse_status] || statusConfig.pending;
+
+              return (
+                <div
+                  key={book.id}
+                  className="bg-white rounded-xl p-4 shadow-sm border hover:shadow-md transition"
+                >
+                  <div className="flex items-center gap-4">
+                    <span className="text-2xl">{book.format === "pdf" ? "📕" : "📘"}</span>
+
+                    {/* 书名 + 元信息 */}
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium truncate">{book.title}</p>
+                      <p className="text-sm text-gray-400 mt-0.5">
+                        {book.format.toUpperCase()}
+                        {book.total_chapters > 0 && ` · ${book.total_chapters} 章`}
+                        {` · 上传于 ${formatTime(book.uploaded_at || book.created_at)}`}
+                      </p>
+                    </div>
+
+                    {/* 解析状态标签 */}
+                    {isParsing ? (
+                      <span className="text-xs px-2.5 py-1 rounded-full bg-yellow-100 text-yellow-700 shrink-0">
+                        解析中...
+                      </span>
+                    ) : (
+                      <span className={`text-xs px-2.5 py-1 rounded-full shrink-0 ${status.bg} ${status.text}`}>
+                        {status.label}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* 操作按钮 */}
+                  <div className="flex gap-2 mt-3 pt-3 border-t border-gray-100">
+                    <button
+                      onClick={() => navigate(`/books/${book.id}`)}
+                      className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                    >
+                      打开
+                    </button>
+                    <button
+                      onClick={() => handleReparse(book.id)}
+                      disabled={isParsing}
+                      className={`px-4 py-1.5 text-sm rounded-lg border transition
+                        ${isParsing
+                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                          : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"
+                        }`}
+                    >
+                      重新解析
+                    </button>
+                    <button
+                      onClick={() => handleDelete(book)}
+                      className="px-4 py-1.5 text-sm rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition"
+                    >
+                      删除
+                    </button>
+                  </div>
                 </div>
-                <span className={`text-xs px-2 py-1 rounded-full ${
-                  book.parse_status === "completed"
-                    ? "bg-green-100 text-green-700"
-                    : book.parse_status === "parsing"
-                    ? "bg-yellow-100 text-yellow-700"
-                    : "bg-gray-100 text-gray-500"
-                }`}>
-                  {book.parse_status === "completed" ? "已解析" : book.parse_status === "parsing" ? "解析中" : "待解析"}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
+        </div>
+      )}
+
+      {/* 空状态 */}
+      {!loading && books.length === 0 && (
+        <div className="text-center py-12 text-gray-400">
+          还没有上传过书籍
         </div>
       )}
     </div>

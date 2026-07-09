@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS books (
     file_path TEXT NOT NULL,
     parse_status TEXT NOT NULL DEFAULT 'pending',
     total_chapters INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS chapters (
@@ -100,9 +101,14 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """初始化数据库表"""
+    """初始化数据库表，兼容旧库添加新字段"""
     conn = get_connection()
     conn.executescript(CREATE_TABLES_SQL)
+    # 兼容旧库：添加 uploaded_at 列
+    try:
+        conn.execute("ALTER TABLE books ADD COLUMN uploaded_at TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
