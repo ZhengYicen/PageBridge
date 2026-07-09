@@ -1,6 +1,7 @@
 """LLM API 统一封装层 — 支持 OpenAI / DeepSeek / Qwen / GLM"""
 
 import json
+import time
 from typing import Optional
 
 import httpx
@@ -34,6 +35,7 @@ class LLMClient:
         messages: list[dict],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        timeout: int = 120,
     ) -> str:
         """
         发送对话请求，返回文本内容
@@ -48,11 +50,61 @@ class LLMClient:
             "stream": False,
         }
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        start = time.monotonic()
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, headers=self._headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            elapsed = time.monotonic() - start
+            content = data["choices"][0]["message"]["content"]
+            # 记录简要日志
+            import logging
+            logger = logging.getLogger("ai-reader.llm")
+            logger.info(
+                "chat: model=%s in=%d out=%d %.1fs",
+                self.model,
+                sum(len(m.get("content", "")) for m in messages),
+                len(content),
+                elapsed,
+            )
+            return content
+
+    async def chat_batch(
+        self,
+        system_prompt: str,
+        items: list[dict],
+        user_prompt_template: str = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: int = 300,
+    ) -> str:
+        """
+        批量对话请求：将多个 item 合并到一次 API 调用。
+        items: [{"id": str, "text": str, ...}, ...]
+        返回模型原始回复文本（需调用方解析 JSON）。
+        """
+        # 构造 user message：将 items 序列化为 JSON
+        if user_prompt_template:
+            user_content = user_prompt_template.format(items=json.dumps(items, ensure_ascii=False))
+        else:
+            user_content = (
+                "Translate the following paragraphs into Chinese.\n"
+                "Return a JSON array where each item has 'id' and 'translation'.\n"
+                "Only output valid JSON, no explanation.\n\n"
+                f"{json.dumps(items, ensure_ascii=False)}"
+            )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        return await self.chat(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens or (self.max_tokens * max(1, len(items))),
+            timeout=timeout,
+        )
 
     async def chat_stream(
         self,

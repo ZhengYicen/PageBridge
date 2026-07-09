@@ -2,6 +2,7 @@
 
 import sqlite3
 import os
+import hashlib
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "app.db"
@@ -64,12 +65,27 @@ CREATE TABLE IF NOT EXISTS glossary (
     UNIQUE(book_id, term)
 );
 
+CREATE TABLE IF NOT EXISTS translations (
+    id TEXT PRIMARY KEY,
+    paragraph_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    target_lang TEXT NOT NULL DEFAULT 'zh',
+    engine TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT DEFAULT '',
+    translated_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_chapters_book_id ON chapters(book_id);
 CREATE INDEX IF NOT EXISTS idx_paragraphs_chapter_id ON paragraphs(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_paragraphs_status ON paragraphs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_chapter_id ON jobs(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_glossary_book_id ON glossary(book_id);
+CREATE INDEX IF NOT EXISTS idx_translations_source_hash ON translations(source_hash);
+CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragraph_id);
 """
 
 
@@ -89,6 +105,11 @@ def init_db():
     conn.executescript(CREATE_TABLES_SQL)
     conn.commit()
     conn.close()
+
+
+def source_hash(text: str) -> str:
+    """计算文本的 MD5 哈希，用于翻译缓存查找"""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:

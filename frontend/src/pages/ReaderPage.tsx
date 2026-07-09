@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, Chapter, Paragraph } from "../api/client";
 
@@ -8,22 +8,83 @@ export default function ReaderPage() {
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [paragraphs, setParagraphs] = useState<Paragraph[]>([]);
   const [loading, setLoading] = useState(true);
+  const [translating, setTranslating] = useState(false);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const leftRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
   const isSyncing = useRef(false);
   const lastSyncedPara = useRef("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── 初始加载 + 预翻译 ──────────────────────────────
 
   useEffect(() => {
     if (!chapterId) return;
+
+    // 加载段落
     api.getParagraphs(chapterId).then((res) => {
       setChapter(res.chapter);
       setParagraphs(res.paragraphs);
       setLoading(false);
+
+      // 检查是否需要自动预翻译
+      const pendingCount = res.paragraphs.filter(
+        (p) => p.status === "pending" || p.status === "failed"
+      ).length;
+      const totalCount = res.paragraphs.length;
+
+      if (pendingCount > 0 && totalCount > 0) {
+        // 启动预翻译
+        setTranslating(true);
+        api.preTranslateChapter(chapterId).then((result) => {
+          if (result.status === "started") {
+            startPolling();
+          } else if (result.status === "completed" || result.status === "no_pending") {
+            setTranslating(false);
+          }
+        }).catch(() => {
+          setTranslating(false);
+        });
+      }
     }).catch(() => setLoading(false));
+
+    return () => {
+      // 清理轮询
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
   }, [chapterId]);
 
-  // 滚动同步（防回弹）
+  // ── 轮询翻译状态 ──────────────────────────────────
+
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return;
+
+    pollRef.current = setInterval(async () => {
+      if (!chapterId) return;
+
+      try {
+        const result = await api.getParagraphTranslations(chapterId);
+        setParagraphs(result.paragraphs);
+        setTranslating(false);
+
+        // 全部完成时停止轮询
+        if (result.translate_status === "completed" || result.completed === result.total) {
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        }
+      } catch {
+        // 轮询失败不中断
+      }
+    }, 1500);
+  }, [chapterId]);
+
+  // ── 滚动同步 ──────────────────────────────────────
+
   const handleScroll = (source: "left" | "right") => {
     if (isSyncing.current) return;
 
@@ -31,7 +92,6 @@ export default function ReaderPage() {
     const targetContainer = source === "left" ? rightRef.current : leftRef.current;
     if (!container || !targetContainer) return;
 
-    // 找出视口内最靠上的段落 ID（不用中心点，避免反复跳动）
     const paras = container.querySelectorAll<HTMLElement>("[data-para-id]");
     let targetId = "";
     for (const el of paras) {
@@ -41,7 +101,6 @@ export default function ReaderPage() {
       }
     }
 
-    // 如果和最上次同步的是同一个，跳过（防回弹）
     if (!targetId || targetId === lastSyncedPara.current) return;
     lastSyncedPara.current = targetId;
 
@@ -50,13 +109,11 @@ export default function ReaderPage() {
     if (targetEl) {
       targetEl.scrollIntoView({ behavior: "instant", block: "nearest" });
     }
-    // 等浏览器渲染完再解锁
     requestAnimationFrame(() => { isSyncing.current = false; });
   };
 
   const handleParaClick = (paraId: string) => {
     setHighlightedId(paraId);
-    // 两侧同时高亮对应段落
     isSyncing.current = true;
     const leftEl = leftRef.current?.querySelector(`[data-para-id="${paraId}"]`);
     const rightEl = rightRef.current?.querySelector(`[data-para-id="${paraId}"]`);
@@ -66,6 +123,8 @@ export default function ReaderPage() {
     setTimeout(() => setHighlightedId(null), 2000);
   };
 
+  // ── 渲染 ──────────────────────────────────────────
+
   if (loading) {
     return <div className="text-center py-12 text-gray-400">加载中...</div>;
   }
@@ -73,6 +132,9 @@ export default function ReaderPage() {
   if (!chapter) {
     return <div className="text-center py-12 text-gray-400">章节不存在</div>;
   }
+
+  const completedCount = paragraphs.filter((p) => p.status === "completed").length;
+  const totalCount = paragraphs.length;
 
   return (
     <div className="flex flex-col h-[calc(100vh-120px)]">
@@ -86,7 +148,9 @@ export default function ReaderPage() {
         </button>
         <h1 className="text-lg font-semibold truncate">{chapter.title}</h1>
         <span className="text-xs text-gray-400 ml-auto">
-          {paragraphs.filter((p) => p.status === "completed").length}/{paragraphs.length} 段已翻译
+          {completedCount}/{totalCount} 段已翻译
+          {translating && " · 翻译中..."}
+          {completedCount === totalCount && totalCount > 0 && " ✅"}
         </span>
       </div>
 
@@ -117,7 +181,7 @@ export default function ReaderPage() {
         {/* 分隔线 */}
         <div className="w-px bg-gray-200 shrink-0" />
 
-        {/* 译文 */}
+        {/* 译文 — 渐进式显示 */}
         <div
           ref={rightRef}
           className="flex-1 overflow-y-auto bg-white rounded-xl p-6 border"
@@ -134,6 +198,7 @@ export default function ReaderPage() {
                   ${highlightedId === p.id ? "bg-yellow-100 ring-2 ring-yellow-300" : "hover:bg-gray-50"}
                   ${p.status === "pending" ? "text-gray-300 italic" : ""}
                   ${p.status === "failed" ? "text-red-400" : ""}
+                  ${p.status === "completed" ? "text-gray-800" : ""}
                 `}
               >
                 {p.status === "completed"
