@@ -18,10 +18,10 @@ router = APIRouter(prefix="/api", tags=["books"])
 
 @router.get("/books")
 async def list_books():
-    """获取所有书籍"""
+    """获取所有书籍，按上传时间倒序"""
     conn = get_connection()
     rows = rows_to_list(conn.execute(
-        "SELECT * FROM books ORDER BY created_at DESC"
+        "SELECT * FROM books ORDER BY uploaded_at DESC"
     ).fetchall())
     conn.close()
     return {"books": rows}
@@ -180,6 +180,53 @@ async def parse_book(book_id: str):
         conn.close()
         logger.error("解析失败: %s", e, exc_info=True)
         raise HTTPException(500, f"解析失败: {str(e)}")
+
+
+@router.delete("/books/{book_id}")
+async def delete_book(book_id: str):
+    """删除书籍及其所有关联数据"""
+    conn = get_connection()
+    book = row_to_dict(conn.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone())
+    if not book:
+        conn.close()
+        raise HTTPException(404, "书籍不存在")
+
+    # 清理 chapters、paragraphs、translations、jobs
+    old_chapters = conn.execute(
+        "SELECT id FROM chapters WHERE book_id=?", (book_id,)
+    ).fetchall()
+    old_chapter_ids = [r["id"] for r in old_chapters]
+
+    if old_chapter_ids:
+        placeholders = ",".join("?" * len(old_chapter_ids))
+        para_ids = conn.execute(
+            f"SELECT id FROM paragraphs WHERE chapter_id IN ({placeholders})",
+            old_chapter_ids,
+        ).fetchall()
+        if para_ids:
+            pid_placeholders = ",".join("?" * len(para_ids))
+            pids = [r["id"] for r in para_ids]
+            conn.execute(
+                f"DELETE FROM translations WHERE paragraph_id IN ({pid_placeholders})",
+                pids,
+            )
+        conn.execute(f"DELETE FROM paragraphs WHERE chapter_id IN ({placeholders})", old_chapter_ids)
+        conn.execute(f"DELETE FROM jobs WHERE chapter_id IN ({placeholders})", old_chapter_ids)
+        conn.execute(f"DELETE FROM chapters WHERE id IN ({placeholders})", old_chapter_ids)
+
+    # 删除书籍记录
+    conn.execute("DELETE FROM books WHERE id=?", (book_id,))
+    conn.commit()
+    conn.close()
+
+    # 清理图片资源
+    import shutil
+    asset_dir = STORAGE_DIR / "books" / book_id
+    if asset_dir.exists():
+        shutil.rmtree(asset_dir)
+
+    logger.info("已删除书籍: %s (%s)", book["title"], book_id)
+    return {"status": "deleted"}
 
 
 @router.get("/books/{book_id}/assets/{asset_path:path}")

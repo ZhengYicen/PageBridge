@@ -21,6 +21,7 @@ export interface Book {
   parse_status: string;
   total_chapters: number;
   created_at: string;
+  uploaded_at?: string;
   chapters?: Chapter[];
 }
 
@@ -90,6 +91,9 @@ export const api = {
   pauseJob: (id: string) => request<{ status: string }>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: string) => request<{ status: string }>(`/jobs/${id}/resume`, { method: "POST" }),
   retryJob: (id: string) => request<{ status: string }>(`/jobs/${id}/retry`, { method: "POST" }),
+
+  // 书籍管理
+  deleteBook: (id: string) => request<{ status: string }>(`/books/${id}`, { method: "DELETE" }),
 
   // 翻译状态轮询
   getParagraphTranslations: (chapterId: string) =>

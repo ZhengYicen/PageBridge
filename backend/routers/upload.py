@@ -30,9 +30,11 @@ async def upload_file(file: UploadFile = File(...)):
     # 创建书籍记录
     book_id = file_id
     conn = get_connection()
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO books (id, title, format, file_path) VALUES (?,?,?,?)",
-        (book_id, file.filename, ext.lstrip("."), str(save_path)),
+        "INSERT INTO books (id, title, format, file_path, uploaded_at) VALUES (?,?,?,?,?)",
+        (book_id, file.filename, ext.lstrip("."), str(save_path), now),
     )
     conn.commit()
     conn.close()
