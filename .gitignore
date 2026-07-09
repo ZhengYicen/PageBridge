@@ -17,6 +17,7 @@ dist/
 # 存储
 storage/*.db
 storage/uploads/*
+storage/books/
 
 # IDE
 .vscode/
