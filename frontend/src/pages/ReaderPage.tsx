@@ -136,6 +136,17 @@ export default function ReaderPage() {
   const completedCount = paragraphs.filter((p) => p.status === "completed").length;
   const totalCount = paragraphs.length;
 
+  // 渲染译文内容（支持图片 JSX）
+  const renderTranslation = (p: Paragraph) => {
+    if (p.status === "image") {
+      return <span dangerouslySetInnerHTML={{ __html: p.source_html || p.source_text }} />;
+    }
+    if (p.status === "completed") return p.translation;
+    if (p.status === "failed") return `[翻译失败] ${p.error_message || ""}`;
+    if (p.status === "pending") return "等待翻译...";
+    return "翻译中...";
+  };
+
   return (
     <div className="flex flex-col h-[calc(100vh-120px)]">
       {/* 顶部信息 */}
@@ -171,7 +182,7 @@ export default function ReaderPage() {
                 onClick={() => handleParaClick(p.id)}
                 className={`leading-relaxed cursor-pointer transition rounded px-2 py-1
                   ${highlightedId === p.id ? "bg-yellow-100 ring-2 ring-yellow-300" : "hover:bg-gray-50"}
-                  ${p.type === "image" ? "p-0 bg-gray-50 flex justify-center" : ""}
+                  ${p.status === "image" ? "p-0 bg-gray-50 flex justify-center" : ""}
                 `}
                 dangerouslySetInnerHTML={{ __html: p.source_html || p.source_text }}
               />
@@ -200,18 +211,10 @@ export default function ReaderPage() {
                   ${p.status === "pending" ? "text-gray-300 italic" : ""}
                   ${p.status === "failed" ? "text-red-400" : ""}
                   ${p.status === "completed" ? "text-gray-800" : ""}
-                  ${p.type === "image" ? "text-gray-400 text-xs text-center" : ""}
+                  ${p.status === "image" ? "p-0 bg-gray-50 flex justify-center" : ""}
                 `}
               >
-                {p.type === "image"
-                  ? "🖼️ " + (p.source_text || "插图")
-                  : p.status === "completed"
-                  ? p.translation
-                  : p.status === "failed"
-                  ? `[翻译失败] ${p.error_message || ""}`
-                  : p.status === "pending"
-                  ? "等待翻译..."
-                  : "翻译中..."}
+                {renderTranslation(p)}
               </div>
             ))}
           </div>
