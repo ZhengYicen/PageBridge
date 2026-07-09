@@ -89,6 +89,24 @@ export const api = {
   pauseJob: (id: string) => request<{ status: string }>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: string) => request<{ status: string }>(`/jobs/${id}/resume`, { method: "POST" }),
   retryJob: (id: string) => request<{ status: string }>(`/jobs/${id}/retry`, { method: "POST" }),
+
+  // 翻译状态轮询
+  getParagraphTranslations: (chapterId: string) =>
+    request<{
+      chapter_id: string;
+      chapter_title: string;
+      translate_status: string;
+      total: number;
+      completed: number;
+      paragraphs: Paragraph[];
+    }>(`/paragraphs/${chapterId}/translations`),
+
+  // 预翻译
+  preTranslateChapter: (chapterId: string) =>
+    request<{ job_id?: string; chapter_id: string; status: string; message?: string; pending?: number }>(
+      `/chapters/${chapterId}/pre-translate`, { method: "POST" }
+    ),
+
   subscribeProgress: (jobId: string, onMessage: (data: any) => void) => {
     const es = new EventSource(`${API_BASE}/jobs/${jobId}/progress`);
     es.onmessage = (e) => {

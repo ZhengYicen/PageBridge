@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database import init_db
-from backend.routers import upload, books, chapters, jobs
+from backend.routers import upload, books, chapters, jobs, paragraphs
 
 
 @asynccontextmanager
@@ -51,6 +51,7 @@ app.include_router(upload.router)
 app.include_router(books.router)
 app.include_router(chapters.router)
 app.include_router(jobs.router)
+app.include_router(paragraphs.router)
 
 
 @app.get("/health")

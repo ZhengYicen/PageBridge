@@ -1,24 +1,33 @@
-"""后台任务管理器 — 管理翻译任务的执行、暂停、继续、重试"""
+"""后台任务管理器 — 批量翻译 + 缓存 + 耗时日志"""
 
 import asyncio
+import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Optional
 
-from backend.database import get_connection, row_to_dict, rows_to_list
+from backend.database import get_connection, row_to_dict, rows_to_list, source_hash
 from backend.agents.translator import TranslatorAgent
+
+logger = logging.getLogger("ai-reader.worker")
+
+BATCH_SIZE = 8
 
 
 class JobManager:
     """
     翻译任务管理器
-    用 in-memory dict 跟踪运行中的任务，支持暂停/继续/重试
-    每个任务是一个 asyncio.Task，定期检查自己的暂停标志
+    改进：
+      - 批量翻译（一次请求翻 N 段）
+      - 缓存命中直接返回
+      - 耗时日志
+      - 增量标记完成（前端可见渐进式）
     """
 
     def __init__(self):
-        self._tasks: dict[str, asyncio.Task] = {}  # job_id -> asyncio.Task
-        self._pause_flags: dict[str, asyncio.Event] = {}  # job_id -> Event
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._pause_flags: dict[str, asyncio.Event] = {}
 
     # ── 任务生命周期 ────────────────────────────────
 
@@ -27,7 +36,6 @@ class JobManager:
         if job_id is None:
             job_id = str(uuid.uuid4())
 
-        # 检查章节是否有待翻译段落
         conn = get_connection()
         rows = conn.execute(
             "SELECT id, source_text FROM paragraphs WHERE chapter_id=? AND status='pending' ORDER BY paragraph_order",
@@ -38,7 +46,6 @@ class JobManager:
         if not rows:
             raise ValueError("该章节没有待翻译的段落")
 
-        # 创建 job 记录
         conn = get_connection()
         conn.execute(
             "INSERT INTO jobs (id, chapter_id, status, total_paragraphs, job_type) VALUES (?,?,?,?,?)",
@@ -47,18 +54,17 @@ class JobManager:
         conn.commit()
         conn.close()
 
-        # 创建暂停标志
         self._pause_flags[job_id] = asyncio.Event()
-        self._pause_flags[job_id].set()  # 默认不暂停
+        self._pause_flags[job_id].set()
 
-        # 启动后台任务
+        # 启动后台任务（不 await）
         task = asyncio.create_task(self._translate_loop(job_id, chapter_id, rows))
         self._tasks[job_id] = task
 
+        logger.info("任务启动: job=%s chapter=%s 段落=%d", job_id, chapter_id, len(rows))
         return job_id
 
     async def pause(self, job_id: str) -> bool:
-        """暂停任务"""
         if job_id in self._pause_flags:
             self._pause_flags[job_id].clear()
             self._update_job_status(job_id, "paused")
@@ -66,7 +72,6 @@ class JobManager:
         return False
 
     async def resume(self, job_id: str) -> bool:
-        """继续任务"""
         if job_id in self._pause_flags:
             self._pause_flags[job_id].set()
             self._update_job_status(job_id, "running")
@@ -74,14 +79,12 @@ class JobManager:
         return False
 
     async def retry_failed(self, job_id: str) -> bool:
-        """重试任务中失败的段落"""
         conn = get_connection()
         job = row_to_dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
         if not job:
             conn.close()
             return False
 
-        # 将失败段落重置为 pending
         conn.execute(
             "UPDATE paragraphs SET status='pending', error_message='' WHERE chapter_id=? AND status='failed'",
             (job["chapter_id"],),
@@ -89,7 +92,6 @@ class JobManager:
         conn.commit()
         conn.close()
 
-        # 准备重新运行
         conn = get_connection()
         rows = conn.execute(
             "SELECT id, source_text FROM paragraphs WHERE chapter_id=? AND status='pending' ORDER BY paragraph_order",
@@ -106,71 +108,107 @@ class JobManager:
         return True
 
     def get_status(self, job_id: str) -> Optional[dict]:
-        """获取任务状态"""
         conn = get_connection()
         job = row_to_dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
         conn.close()
         return job
 
-    # ── 内部 ─────────────────────────────────────────
+    # ── 内部：翻译循环 ──────────────────────────────
 
     async def _translate_loop(self, job_id: str, chapter_id: str, paragraphs: list[dict]):
-        """翻译循环：逐段翻译，支持暂停检查"""
+        """
+        批量翻译循环：
+          1. 每批先查缓存
+          2. 未命中的批量调 API
+          3. 逐段写入 DB（前端可见渐进式）
+          4. 输出耗时日志
+        """
         translator = TranslatorAgent()
         conn = get_connection()
         completed = 0
         failed = 0
-        last_translation = ""
+        total = len(paragraphs)
+
+        job_start = time.monotonic()
+        logger.info("翻译循环开始: job=%s chapter=%s 共%d段", job_id, chapter_id, total)
 
         try:
-            for para_id, source_text in ((r["id"], r["source_text"]) for r in paragraphs):
-                # 检查暂停
+            # 分批处理
+            for batch_start in range(0, total, BATCH_SIZE):
+                # 检查暂停/取消
                 await self._pause_flags[job_id].wait()
-
-                # 检查是否被取消
                 if asyncio.current_task().cancelled():
+                    logger.info("翻译循环被取消: job=%s", job_id)
                     break
 
-                try:
-                    # 更新段落状态为翻译中
+                batch_rows = paragraphs[batch_start:batch_start + BATCH_SIZE]
+                batch = [
+                    {"id": r["id"], "text": r["source_text"], "chapter_id": chapter_id}
+                    for r in batch_rows
+                ]
+
+                batch_log_start = time.monotonic()
+                results = await translator.translate_batch(batch)
+                batch_elapsed = time.monotonic() - batch_log_start
+
+                # 逐段写入 DB
+                write_start = time.monotonic()
+                for r, result in zip(batch_rows, results):
+                    para_id = r["id"]
+                    translation = result.get("translation", "")
+                    error = result.get("error")
+
+                    if translation and not error:
+                        conn.execute(
+                            "UPDATE paragraphs SET translation=?, status='completed', updated_at=datetime('now') WHERE id=?",
+                            (translation, para_id),
+                        )
+                        completed += 1
+                    elif error:
+                        conn.execute(
+                            "UPDATE paragraphs SET status='failed', error_message=?, updated_at=datetime('now') WHERE id=?",
+                            (str(error)[:500], para_id),
+                        )
+                        failed += 1
+                    else:
+                        # 空翻译也算失败
+                        conn.execute(
+                            "UPDATE paragraphs SET status='failed', error_message='empty translation', updated_at=datetime('now') WHERE id=?",
+                            (para_id,),
+                        )
+                        failed += 1
+
+                    # 更新 job 进度（每条写入后立即更新，前端可见）
                     conn.execute(
-                        "UPDATE paragraphs SET status='translating', updated_at=datetime('now') WHERE id=?",
-                        (para_id,),
+                        "UPDATE jobs SET completed_paragraphs=?, failed_paragraphs=?, updated_at=datetime('now') WHERE id=?",
+                        (completed, failed, job_id),
                     )
                     conn.commit()
 
-                    # 调用翻译
-                    translation = await translator.translate(source_text, last_translation)
-                    last_translation = translation
+                write_elapsed = time.monotonic() - write_start
 
-                    # 保存译文
-                    conn.execute(
-                        "UPDATE paragraphs SET translation=?, status='completed', updated_at=datetime('now') WHERE id=?",
-                        (translation, para_id),
-                    )
-                    completed += 1
-
-                except Exception as e:
-                    conn.execute(
-                        "UPDATE paragraphs SET status='failed', error_message=?, updated_at=datetime('now') WHERE id=?",
-                        (str(e)[:500], para_id),
-                    )
-                    failed += 1
-
-                # 更新 job 进度
-                conn.execute(
-                    "UPDATE jobs SET completed_paragraphs=?, failed_paragraphs=?, updated_at=datetime('now') WHERE id=?",
-                    (completed, failed, job_id),
+                logger.info(
+                    "  batch %3d-%3d/%d: %d完成 %d失败 batch=%.1fs write=%.1fs 累计=%d/%d",
+                    batch_start + 1,
+                    min(batch_start + BATCH_SIZE, total),
+                    total,
+                    sum(1 for r in results if r.get("translation") and not r.get("error")),
+                    sum(1 for r in results if r.get("error")),
+                    batch_elapsed,
+                    write_elapsed,
+                    completed,
+                    total,
                 )
-                conn.commit()
 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error("翻译循环异常: job=%s error=%s", job_id, e, exc_info=True)
         finally:
             conn.close()
 
-        # 更新最终状态
-        total = len(paragraphs)
+        # 最终状态
+        total_elapsed = time.monotonic() - job_start
         final_status = "completed" if failed == 0 and completed == total else "partial"
         if failed == total:
             final_status = "failed"
@@ -197,9 +235,14 @@ class JobManager:
         conn.commit()
         conn.close()
 
-        # 清理
         self._tasks.pop(job_id, None)
         self._pause_flags.pop(job_id, None)
+
+        avg_speed = total / total_elapsed if total_elapsed > 0 else 0
+        logger.info(
+            "翻译完成: job=%s chapter=%s status=%s %d/%d 段 %.1fs (%.2f 段/秒)",
+            job_id, chapter_id, final_status, completed, total, total_elapsed, avg_speed,
+        )
 
     def _update_job_status(self, job_id: str, status: str):
         conn = get_connection()

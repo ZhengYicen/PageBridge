@@ -44,3 +44,37 @@ async def translate_chapter(chapter_id: str):
         return {"job_id": job_id, "chapter_id": chapter_id, "status": "started"}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.post("/chapters/{chapter_id}/pre-translate")
+async def pre_translate_chapter(chapter_id: str):
+    """
+    预翻译：打开章节后自动触发。
+    只翻译 pending 段落，不会重复翻译已完成段落。
+    如果章节已全部翻完或已有翻译任务在运行，直接返回。
+    """
+    conn = get_connection()
+    chapter = row_to_dict(conn.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone())
+    conn.close()
+
+    if not chapter:
+        raise HTTPException(404, "章节不存在")
+
+    if chapter["translate_status"] == "completed":
+        return {"status": "completed", "message": "该章节已翻译完成"}
+
+    conn2 = get_connection()
+    pending_count = conn2.execute(
+        "SELECT COUNT(*) as cnt FROM paragraphs WHERE chapter_id=? AND status='pending'",
+        (chapter_id,),
+    ).fetchone()["cnt"]
+    conn2.close()
+
+    if pending_count == 0:
+        return {"status": "no_pending", "message": "没有待翻译的段落"}
+
+    try:
+        job_id = await job_manager.start_translate(chapter_id)
+        return {"job_id": job_id, "chapter_id": chapter_id, "status": "started", "pending": pending_count}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
