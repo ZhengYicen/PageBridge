@@ -155,7 +155,12 @@ export default function UploadPage() {
                   </span>
 
                   <div className="flex-1 min-w-0 self-center">
-                    <p className="font-medium truncate text-gray-900">{book.title}</p>
+                    <p
+                      className="font-medium truncate text-gray-900 cursor-pointer hover:text-blue-600"
+                      onClick={() => navigate(`/books/${book.id}`)}
+                    >
+                      {book.title}
+                    </p>
                     <p className="text-sm text-gray-400 mt-0.5">
                       {book.format.toUpperCase()}
                       {book.total_chapters > 0 && ` · ${book.total_chapters} 章`}
