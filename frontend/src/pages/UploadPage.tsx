@@ -139,39 +139,35 @@ export default function UploadPage() {
             {books.map((book) => {
               const isParsing = parsingIds.has(book.id) || book.parse_status === "parsing";
               const status = statusConfig[book.parse_status] || statusConfig.pending;
+              const statusLabel = isParsing ? "解析中..." : status.label;
+              const statusBg = isParsing ? "bg-yellow-100" : status.bg;
+              const statusText = isParsing ? "text-yellow-700" : status.text;
 
               return (
                 <div
                   key={book.id}
-                  className="bg-white rounded-xl p-4 shadow-sm border hover:shadow-md transition"
+                  className="bg-white rounded-xl px-5 py-4 shadow-sm border hover:shadow-md transition flex items-center gap-4"
+                  style={{ minHeight: 100 }}
                 >
-                  <div className="flex items-center gap-4">
-                    <span className="text-2xl">{book.format === "pdf" ? "📕" : "📘"}</span>
+                  {/* ── 左侧：图标 + 信息 ── */}
+                  <span className="text-3xl shrink-0 self-center">
+                    {book.format === "pdf" ? "📕" : "📘"}
+                  </span>
 
-                    {/* 书名 + 元信息 */}
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium truncate">{book.title}</p>
-                      <p className="text-sm text-gray-400 mt-0.5">
-                        {book.format.toUpperCase()}
-                        {book.total_chapters > 0 && ` · ${book.total_chapters} 章`}
-                        {` · 上传于 ${formatTime(book.uploaded_at || book.created_at)}`}
-                      </p>
-                    </div>
-
-                    {/* 解析状态标签 */}
-                    {isParsing ? (
-                      <span className="text-xs px-2.5 py-1 rounded-full bg-yellow-100 text-yellow-700 shrink-0">
-                        解析中...
-                      </span>
-                    ) : (
-                      <span className={`text-xs px-2.5 py-1 rounded-full shrink-0 ${status.bg} ${status.text}`}>
-                        {status.label}
-                      </span>
-                    )}
+                  <div className="flex-1 min-w-0 self-center">
+                    <p className="font-medium truncate text-gray-900">{book.title}</p>
+                    <p className="text-sm text-gray-400 mt-0.5">
+                      {book.format.toUpperCase()}
+                      {book.total_chapters > 0 && ` · ${book.total_chapters} 章`}
+                      {` · 上传于 ${formatTime(book.uploaded_at || book.created_at)}`}
+                    </p>
+                    <span className={`inline-block mt-1.5 text-xs px-2.5 py-0.5 rounded-full ${statusBg} ${statusText}`}>
+                      {statusLabel}
+                    </span>
                   </div>
 
-                  {/* 操作按钮 */}
-                  <div className="flex gap-2 mt-3 pt-3 border-t border-gray-100">
+                  {/* ── 右侧：操作按钮 ── */}
+                  <div className="flex items-center gap-2 shrink-0 self-center">
                     <button
                       onClick={() => navigate(`/books/${book.id}`)}
                       className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
