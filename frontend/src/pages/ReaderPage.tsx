@@ -171,6 +171,7 @@ export default function ReaderPage() {
                 onClick={() => handleParaClick(p.id)}
                 className={`leading-relaxed cursor-pointer transition rounded px-2 py-1
                   ${highlightedId === p.id ? "bg-yellow-100 ring-2 ring-yellow-300" : "hover:bg-gray-50"}
+                  ${p.type === "image" ? "p-0 bg-gray-50 flex justify-center" : ""}
                 `}
                 dangerouslySetInnerHTML={{ __html: p.source_html || p.source_text }}
               />
@@ -199,9 +200,12 @@ export default function ReaderPage() {
                   ${p.status === "pending" ? "text-gray-300 italic" : ""}
                   ${p.status === "failed" ? "text-red-400" : ""}
                   ${p.status === "completed" ? "text-gray-800" : ""}
+                  ${p.type === "image" ? "text-gray-400 text-xs text-center" : ""}
                 `}
               >
-                {p.status === "completed"
+                {p.type === "image"
+                  ? "🖼️ " + (p.source_text || "插图")
+                  : p.status === "completed"
                   ? p.translation
                   : p.status === "failed"
                   ? `[翻译失败] ${p.error_message || ""}`
