@@ -44,6 +44,7 @@ export interface Paragraph {
   source_bbox: string;
   translation: string;
   status: string;
+  type?: string;
   error_message: string;
   updated_at: string;
 }

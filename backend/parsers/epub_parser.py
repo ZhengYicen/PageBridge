@@ -6,11 +6,13 @@
   3. 将 TOC entry 定位到 block stream 中的精确位置
   4. 以 TOC cut points 切割章节，支持 anchor 级别的精细切割
   5. TOC 异常时 fallback 到 heading 切割
+  6. 提取并保存 EPUB 中的图片资源，生成 type=image block
 """
 
 import html
 import logging
 import re
+import uuid
 from pathlib import Path
 from urllib.parse import urldefrag
 
@@ -23,13 +25,25 @@ logger = logging.getLogger("ai-reader.parse.epub")
 # 这些标签的内容会被丢弃
 REMOVE_TAGS = frozenset({"script", "style", "nav", "noscript"})
 
+# 图片 MIME 类型前缀
+IMAGE_MIME_PREFIXES = ("image/",)
+
+# 存储根目录（由 config 定义）
+STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage"
+
 
 class EpubParser:
     """解析 EPUB 文件，基于 spine 顺序提取 block stream，再按 TOC 切割章节"""
 
+    def __init__(self):
+        # 图片映射：EPUB 内部路径 → Web 可访问 URL
+        self._image_map: dict[str, str] = {}
+        # book_id（用于图片路径构建）
+        self._book_id: str | None = None
+
     # ── 公开接口 ──────────────────────────────────────
 
-    def parse(self, file_path: str) -> list[dict]:
+    def parse(self, file_path: str, book_id: str = None) -> list[dict]:
         """
         返回章节列表，保持对外兼容但增强字段：
         {
@@ -40,16 +54,23 @@ class EpubParser:
                 {
                     "text": str,
                     "html": str,
-                    "type": "heading" | "paragraph" | "list_item" | "quote",
+                    "type": "heading" | "paragraph" | "list_item" | "quote" | "image",
                     "level": int | None,
                     "locator": {"file": str, "file_order": int, "tag": str, "id": str | None},
                     "page_number": 0,
+                    "paragraph_order": int,
                 }
             ]
         }
         """
+        self._book_id = book_id
         logger.info("开始解析 EPUB: %s", file_path)
         book = epub.read_epub(file_path)
+
+        # 0. 提取图片资源（如果提供了 book_id）
+        self._image_map = {}
+        if book_id:
+            self._extract_and_map_images(book, book_id)
 
         # 1. spine 顺序的文档列表
         spine_items = self._get_spine_items(book)
@@ -120,6 +141,92 @@ class EpubParser:
                         len(ch.get("paragraphs", [])))
 
         return chapters
+
+    # ── 图片提取 ─────────────────────────────────────
+
+    def _extract_and_map_images(self, book, book_id: str):
+        """
+        从 EPUB 中提取图片资源，保存到 storage/books/{book_id}/assets/，
+        并构建 {EPUB内部路径 → Web URL} 映射。
+        """
+        asset_dir = STORAGE_DIR / "books" / book_id / "assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+
+        used_names: set[str] = set()
+
+        # 收集所有图片 item（ITEM_IMAGE + ITEM_SVG）
+        image_items = []
+        for item in book.get_items():
+            if item.get_type() == ebooklib.ITEM_IMAGE:
+                image_items.append(item)
+            elif item.get_type() == getattr(ebooklib, "ITEM_SVG", -1):
+                image_items.append(item)
+            elif "svg" in (getattr(item, "media_type", None) or "").lower():
+                image_items.append(item)
+
+        if not image_items:
+            logger.info("EPUB 中未发现图片资源")
+            return
+
+        logger.info("EPUB 图片资源: %d 个", len(image_items))
+
+        for item in image_items:
+            original_name = item.get_name()
+            basename = Path(original_name).name
+            # 安全化文件名
+            safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', basename)
+            if not safe_name:
+                safe_name = f"img_{uuid.uuid4().hex[:8]}"
+            # 处理重名
+            if safe_name in used_names:
+                stem = Path(safe_name).stem
+                ext = Path(safe_name).suffix
+                counter = 1
+                while f"{stem}_{counter}{ext}" in used_names:
+                    counter += 1
+                safe_name = f"{stem}_{counter}{ext}"
+            used_names.add(safe_name)
+
+            # 保存文件
+            file_path = asset_dir / safe_name
+            try:
+                file_path.write_bytes(item.get_content())
+            except Exception as e:
+                logger.warning("图片保存失败: %s (%s)", original_name, e)
+                continue
+
+            # 构建 Web URL
+            web_url = f"/api/books/{book_id}/assets/{safe_name}"
+            self._image_map[original_name] = web_url
+
+        logger.info("图片已保存: %d 个 → %s", len(self._image_map), asset_dir)
+
+    def _resolve_image_src(self, img_src: str, item_name: str) -> str:
+        """
+        将 EPUB 内部的 img src 解析为可访问的 Web URL。
+        处理相对路径（相对于 XHTML 文件位置）。
+        """
+        if not img_src:
+            return ""
+
+        # 1. 直接匹配
+        if img_src in self._image_map:
+            return self._image_map[img_src]
+
+        # 2. 相对于 XHTML 目录解析
+        item_dir = Path(item_name).parent
+        resolved = (item_dir / img_src).as_posix()
+        if resolved in self._image_map:
+            return self._image_map[resolved]
+
+        # 3. basename 匹配（最宽松）
+        img_basename = Path(img_src).name
+        for orig_name, web_url in self._image_map.items():
+            if Path(orig_name).name == img_basename:
+                return web_url
+
+        # 未找到匹配
+        return img_src
 
     # ── Spine ─────────────────────────────────────────
 
@@ -265,6 +372,7 @@ class EpubParser:
         """
         递归遍历容器子树，提取语义块。
         叶子语义标签（p/h1-h6/blockquote/li）→ 生成 block
+        图片标签（img/figure）→ 生成 image block
         容器标签（div/section/article）→ 递归进入
         """
         for child in container.children:
@@ -277,45 +385,61 @@ class EpubParser:
             if name in REMOVE_TAGS:
                 continue
 
+            # ── 独立图片 ──
+            if name == "img":
+                self._add_image_block(child, item_name, blocks, counter)
+                continue
+
+            # ── figure 标签 ──
+            if name == "figure":
+                # 提取内部所有 img
+                imgs = child.find_all("img")
+                if imgs:
+                    for img in imgs:
+                        self._add_image_block(img, item_name, blocks, counter)
+                else:
+                    # 没有 img 的 figure 当作 div 处理
+                    self._extract_blocks_recursive(child, item_name, blocks, counter)
+                continue
+
             # ── 标题 h1-h6 ──
             if name.startswith("h") and len(name) == 2 and name[1].isdigit():
                 level = int(name[1])
-                text = self._clean_text(child.get_text(" ", strip=True))
-                if text:  # 保留所有非空标题（含 TOC 锚点）
+                text = self._clean_text(self._extract_text(child))
+                if text:
                     blocks.append(self._make_block(
                         text, str(child), "heading", level, item_name, counter[0], child,
                     ))
                     counter[0] += 1
+                continue
 
             # ── 段落 ──
-            elif name == "p":
-                text = self._clean_text(child.get_text(" ", strip=True))
-                if text:  # 保留所有非空段落（含 TOC 锚点）
-                    blocks.append(self._make_block(
-                        text, str(child), "paragraph", None, item_name, counter[0], child,
-                    ))
-                    counter[0] += 1
+            if name == "p":
+                self._extract_paragraph(child, item_name, blocks, counter)
+                continue
 
             # ── 引用 ──
-            elif name == "blockquote":
-                text = self._clean_text(child.get_text(" ", strip=True))
-                if text:  # 保留所有非空引用
+            if name == "blockquote":
+                text = self._clean_text(self._extract_text(child))
+                if text:
                     blocks.append(self._make_block(
                         text, str(child), "quote", None, item_name, counter[0], child,
                     ))
                     counter[0] += 1
+                continue
 
             # ── 列表项 ──
-            elif name == "li":
-                text = self._clean_text(child.get_text(" ", strip=True))
-                if text:  # 保留所有非空列表项
+            if name == "li":
+                text = self._clean_text(self._extract_text(child))
+                if text:
                     blocks.append(self._make_block(
                         text, str(child), "list_item", None, item_name, counter[0], child,
                     ))
                     counter[0] += 1
+                continue
 
             # ── 容器标签，递归 ──
-            elif name in (
+            if name in (
                 "div", "section", "article", "main",
                 "header", "footer",
                 "ol", "ul", "dl",
@@ -323,7 +447,66 @@ class EpubParser:
             ):
                 self._extract_blocks_recursive(child, item_name, blocks, counter)
 
-    # ── Block 工厂 ────────────────────────────────────
+    def _extract_paragraph(self, child: Tag, item_name: str, blocks: list[dict], counter: list[int]):
+        """
+        处理 <p> 标签：可能包含文本、图片、或两者都有。
+        """
+        imgs = child.find_all("img")
+        text = self._clean_text(self._extract_text(child))
+
+        # 有文字：生成 paragraph block
+        if text:
+            blocks.append(self._make_block(
+                text, str(child), "paragraph", None, item_name, counter[0], child,
+            ))
+            counter[0] += 1
+
+        # 有图片：额外生成 image block（无论是否有文字）
+        for img in imgs:
+            self._add_image_block(img, item_name, blocks, counter)
+
+        # 既无文字也无图片：跳过
+        if not text and not imgs:
+            pass
+
+    def _add_image_block(self, img_tag: Tag, item_name: str, blocks: list[dict], counter: list[int]):
+        """将 <img> 标签生成为 image block"""
+        src = img_tag.get("src", "")
+        alt = img_tag.get("alt", "")
+
+        # 解析图片 URL
+        resolved_src = self._resolve_image_src(src, item_name)
+
+        # 更新 html 中的 src
+        if resolved_src != src and self._image_map:
+            img_html = str(img_tag).replace(f'src="{src}"', f'src="{resolved_src}"')
+            img_html = img_html.replace(f"src='{src}'", f"src='{resolved_src}'")
+        else:
+            img_html = str(img_tag)
+
+        block = self._make_block(
+            alt or "",
+            img_html,
+            "image",
+            None,
+            item_name,
+            counter[0],
+            img_tag,
+        )
+        # 额外记录图片信息
+        block["_image_src"] = src
+        block["_image_url"] = resolved_src
+        blocks.append(block)
+        counter[0] += 1
+
+    # ── 文本提取 ─────────────────────────────────────
+
+    def _extract_text(self, tag: Tag) -> str:
+        """
+        提取文本，保留 inline 连续性。
+        使用空字符串作为连接符，避免 inline span 之间被插入多余空格。
+        """
+        return tag.get_text("", strip=False)
 
     def _make_block(
         self,
@@ -357,8 +540,23 @@ class EpubParser:
             return ""
         text = html.unescape(text)
         text = text.replace("\xa0", " ")     # 不间断空格 → 普通空格
-        text = text.replace("\xad", "")      # 移除软连字符
+        text = text.replace("\xad", "")      # 移除软连字符 \xad
+        # 将各种 Unicode 连字符标准化为普通连字符
+        text = text.replace("‐", "-")   # 短连字符
+        text = text.replace("‑", "-")   # 非断连字符
         text = re.sub(r"\s+", " ", text)     # 合并连续空白
+
+        # 断词修复：situa- tion → situation
+        # 仅匹配：小写字母 + 连字符 + 空白 + 小写字母
+        # 不匹配：post-Soviet（连字符后大写）
+        # 不匹配：all-Persia（连字符后大写）
+        text = re.sub(r"([a-z])-\s+([a-z])", r"\1\2", text)
+
+        # 修复 span 导致的空格：diff icult → difficult（小写+空格+小写且合并后成词）
+        # 注意：这可能会合并正常两个词 "big apple" → "bigapple" 😰
+        # 所以不能简单删除所有空格。上面那个正则已经足够处理连字符断行了。
+        # 对于 span 无连字符的情况，get_text("") 已经解决。
+
         text = re.sub(r"\s+([,.;:!?%)\]}>])", r"\1", text)  # 标点前多余空格
         text = text.strip()
         return text
@@ -609,7 +807,7 @@ class EpubParser:
     # ── Block 输出转换 ────────────────────────────────
 
     def _blocks_to_paragraphs(self, blocks: list[dict]) -> list[dict]:
-        """将内部 block 转为输出 paragraph dict（剥离 _tag）"""
+        """将内部 block 转为输出 paragraph dict（剥离 _tag，添加 paragraph_order）"""
         return [
             {
                 "text": b["text"],
@@ -618,6 +816,7 @@ class EpubParser:
                 "level": b["level"],
                 "locator": b["locator"],
                 "page_number": b.get("page_number", 0),
+                "paragraph_order": i,
             }
-            for b in blocks
+            for i, b in enumerate(blocks)
         ]
