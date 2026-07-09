@@ -1,9 +1,13 @@
 """EPUB 解析器 — 使用 ebooklib + BeautifulSoup"""
 import html
+import logging
 from pathlib import Path
 
+import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("ai-reader.parse.epub")
 
 
 class EpubParser:
@@ -20,12 +24,16 @@ class EpubParser:
             ]
         }
         """
+        logger.info("开始解析 EPUB: %s", file_path)
         book = epub.read_epub(file_path)
         chapters = []
         toc_map = self._build_toc_map(book)
         order = 0
 
-        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+        logger.info("EPUB 共 %d 个文档项", len(items))
+
+        for idx, item in enumerate(items):
             item_id = item.get_id()
             # 通过 toc_map 获取标题，如果没有则用文件名
             title = toc_map.get(item_id, f"Chapter {order + 1}")
@@ -41,8 +49,10 @@ class EpubParser:
             paragraphs = self._extract_paragraphs(soup)
 
             if not paragraphs:
+                logger.debug("  跳过空文档: %s", title)
                 continue
 
+            logger.info("  ├─ [%d/%d] %s (%d 段)", idx + 1, len(items), title, len(paragraphs))
             chapters.append({
                 "title": title,
                 "chapter_order": order,

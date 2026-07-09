@@ -12,6 +12,7 @@ export default function ReaderPage() {
   const leftRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
   const isSyncing = useRef(false);
+  const lastSyncedPara = useRef("");
 
   useEffect(() => {
     if (!chapterId) return;
@@ -22,42 +23,46 @@ export default function ReaderPage() {
     }).catch(() => setLoading(false));
   }, [chapterId]);
 
-  // 滚动同步
+  // 滚动同步（防回弹）
   const handleScroll = (source: "left" | "right") => {
     if (isSyncing.current) return;
-    isSyncing.current = true;
 
     const container = source === "left" ? leftRef.current : rightRef.current;
     const targetContainer = source === "left" ? rightRef.current : leftRef.current;
     if (!container || !targetContainer) return;
 
-    // 找出中间位置的段落 ID
-    const containerCenter = container.scrollTop + container.clientHeight / 2;
+    // 找出视口内最靠上的段落 ID（不用中心点，避免反复跳动）
     const paras = container.querySelectorAll<HTMLElement>("[data-para-id]");
     let targetId = "";
     for (const el of paras) {
-      if (el.offsetTop + el.offsetHeight / 2 >= containerCenter) {
+      if (el.offsetTop >= container.scrollTop - 10) {
         targetId = el.dataset.paraId || "";
         break;
       }
     }
-    if (targetId) {
-      const targetEl = targetContainer.querySelector(`[data-para-id="${targetId}"]`);
-      if (targetEl) {
-        targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    }
 
-    setTimeout(() => { isSyncing.current = false; }, 100);
+    // 如果和最上次同步的是同一个，跳过（防回弹）
+    if (!targetId || targetId === lastSyncedPara.current) return;
+    lastSyncedPara.current = targetId;
+
+    isSyncing.current = true;
+    const targetEl = targetContainer.querySelector(`[data-para-id="${targetId}"]`);
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: "instant", block: "nearest" });
+    }
+    // 等浏览器渲染完再解锁
+    requestAnimationFrame(() => { isSyncing.current = false; });
   };
 
   const handleParaClick = (paraId: string) => {
     setHighlightedId(paraId);
     // 两侧同时高亮对应段落
+    isSyncing.current = true;
     const leftEl = leftRef.current?.querySelector(`[data-para-id="${paraId}"]`);
     const rightEl = rightRef.current?.querySelector(`[data-para-id="${paraId}"]`);
-    leftEl?.scrollIntoView({ behavior: "smooth", block: "center" });
-    rightEl?.scrollIntoView({ behavior: "smooth", block: "center" });
+    leftEl?.scrollIntoView({ behavior: "instant", block: "center" });
+    rightEl?.scrollIntoView({ behavior: "instant", block: "center" });
+    setTimeout(() => { isSyncing.current = false; }, 200);
     setTimeout(() => setHighlightedId(null), 2000);
   };
 

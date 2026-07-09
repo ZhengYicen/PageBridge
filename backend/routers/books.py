@@ -1,12 +1,15 @@
 """书籍和章节路由"""
 
 import uuid
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from backend.database import get_connection, row_to_dict, rows_to_list
 from backend.parsers import get_parser
+
+logger = logging.getLogger("ai-reader.parse")
 
 router = APIRouter(prefix="/api", tags=["books"])
 
@@ -63,7 +66,9 @@ async def parse_book(book_id: str):
 
     try:
         parser = get_parser(file_path)
+        logger.info("📖 开始解析: %s", Path(file_path).name)
         chapters_data = parser.parse(file_path)
+        logger.info("📖 解析完成，共 %d 章", len(chapters_data))
 
         conn = get_connection()
         chapter_count = 0
@@ -73,6 +78,7 @@ async def parse_book(book_id: str):
             chapter_id = str(uuid.uuid4())
             title = ch["title"]
             paragraphs = ch.get("paragraphs", [])
+            logger.info("  └─ 写入第 %d 章: %s (%d 段)", ch["chapter_order"] + 1, title, len(paragraphs))
 
             conn.execute(
                 "INSERT INTO chapters (id, book_id, title, chapter_order, paragraph_count) VALUES (?,?,?,?,?)",

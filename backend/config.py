@@ -2,6 +2,17 @@
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载 .env 文件（在项目根目录）
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path, override=True)
+else:
+    # 尝试加载 .env.example 作为兜底
+    _example = _env_path.with_suffix(".env.example")
+    if _example.exists():
+        load_dotenv(_example, override=True)
 
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent

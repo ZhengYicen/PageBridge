@@ -1,10 +1,18 @@
 """FastAPI 应用入口"""
 
 import sys
+import logging
 from pathlib import Path
 
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# 日志配置 — 解析、翻译进度都会显示
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 from contextlib import asynccontextmanager
 
