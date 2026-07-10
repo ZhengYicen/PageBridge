@@ -13,7 +13,7 @@ export default function ReaderPage() {
   const leftRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
   const isSyncing = useRef(false);
-  const lastSyncedPara = useRef("");
+  const scrollFrameRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── 初始加载 + 预翻译 ──────────────────────────────
@@ -54,6 +54,11 @@ export default function ReaderPage() {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
+      // 清理滚动帧
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+        scrollFrameRef.current = null;
+      }
     };
   }, [chapterId]);
 
@@ -88,28 +93,63 @@ export default function ReaderPage() {
   const handleScroll = (source: "left" | "right") => {
     if (isSyncing.current) return;
 
-    const container = source === "left" ? leftRef.current : rightRef.current;
-    const targetContainer = source === "left" ? rightRef.current : leftRef.current;
-    if (!container || !targetContainer) return;
+    // RAF 节流
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
 
-    const paras = container.querySelectorAll<HTMLElement>("[data-para-id]");
-    let targetId = "";
-    for (const el of paras) {
-      if (el.offsetTop >= container.scrollTop - 10) {
-        targetId = el.dataset.paraId || "";
-        break;
+      const container = source === "left" ? leftRef.current : rightRef.current;
+      const targetContainer = source === "left" ? rightRef.current : leftRef.current;
+      if (!container || !targetContainer) return;
+
+      const anchorRatio = 0.28;
+      const containerRect = container.getBoundingClientRect();
+      const anchorY = containerRect.top + containerRect.height * anchorRatio;
+
+      const paras = container.querySelectorAll<HTMLElement>("[data-para-id]");
+      if (paras.length === 0) return;
+
+      // 找到距离锚点最近的段落，计算锚点在该段落内的滚动进度
+      let anchorId = "";
+      let progress = 0;
+      let minDist = Infinity;
+
+      for (const el of paras) {
+        const rect = el.getBoundingClientRect();
+        const id = el.dataset.paraId || "";
+        const midY = (rect.top + rect.bottom) / 2;
+        const dist = Math.abs(anchorY - midY);
+
+        if (dist < minDist) {
+          minDist = dist;
+          anchorId = id;
+          const clampedY = Math.max(rect.top, Math.min(rect.bottom, anchorY));
+          progress = rect.height > 0 ? Math.min(1, Math.max(0, (clampedY - rect.top) / rect.height)) : 0;
+        }
       }
-    }
 
-    if (!targetId || targetId === lastSyncedPara.current) return;
-    lastSyncedPara.current = targetId;
+      if (!anchorId) return;
 
-    isSyncing.current = true;
-    const targetEl = targetContainer.querySelector(`[data-para-id="${targetId}"]`);
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: "instant", block: "nearest" });
-    }
-    requestAnimationFrame(() => { isSyncing.current = false; });
+      // 在目标容器中找到同一段落，按相同比例对齐到同一阅读锚点
+      isSyncing.current = true;
+      const targetEl = targetContainer.querySelector<HTMLElement>(`[data-para-id="${anchorId}"]`);
+      if (targetEl) {
+        const targetRect = targetEl.getBoundingClientRect();
+        const targetContainerRect = targetContainer.getBoundingClientRect();
+        const targetAnchorY = targetContainerRect.top + targetContainerRect.height * anchorRatio;
+
+        const pointInParaY = targetRect.top + targetRect.height * progress;
+        const delta = pointInParaY - targetAnchorY;
+        targetContainer.scrollTop += delta;
+      }
+
+      // 两层 RAF 确保布局稳定后再解除同步锁，防止递归触发
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          isSyncing.current = false;
+        });
+      });
+    });
   };
 
   const handleParaClick = (paraId: string) => {
