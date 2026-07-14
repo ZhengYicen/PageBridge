@@ -14,6 +14,11 @@ class BookResponse(BaseModel):
     file_path: str
     parse_status: str
     total_chapters: int
+    total_pages: int = 0
+    parsed_pages: int = 0
+    failed_pages: int = 0
+    current_stage: str = ""
+    error_message: str = ""
     created_at: str
 
 
@@ -92,3 +97,16 @@ class ParseResult(BaseModel):
     chapters: int
     paragraphs: int
     status: str
+    total_pages: int = 0
+
+
+class BookProgressResponse(BaseModel):
+    """解析进度"""
+    book_id: str
+    status: str
+    current_stage: str
+    total_pages: int
+    parsed_pages: int
+    failed_pages: int
+    progress: float
+    error_message: str

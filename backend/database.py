@@ -17,8 +17,30 @@ CREATE TABLE IF NOT EXISTS books (
     file_path TEXT NOT NULL,
     parse_status TEXT NOT NULL DEFAULT 'pending',
     total_chapters INTEGER DEFAULT 0,
+    total_pages INTEGER DEFAULT 0,
+    parsed_pages INTEGER DEFAULT 0,
+    failed_pages INTEGER DEFAULT 0,
+    current_stage TEXT DEFAULT '',
+    error_message TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS book_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id TEXT NOT NULL REFERENCES books(id),
+    page_number INTEGER NOT NULL,
+    width REAL NOT NULL,
+    height REAL NOT NULL,
+    parse_method TEXT NOT NULL DEFAULT '',
+    lines_json TEXT DEFAULT '',
+    raw_text TEXT DEFAULT '',
+    confidence REAL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(book_id, page_number)
 );
 
 CREATE TABLE IF NOT EXISTS chapters (
@@ -87,6 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_chapter_id ON jobs(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_glossary_book_id ON glossary(book_id);
 CREATE INDEX IF NOT EXISTS idx_translations_source_hash ON translations(source_hash);
 CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragraph_id);
+CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
 """
 
 
@@ -105,12 +128,34 @@ def init_db():
     conn = get_connection()
     conn.executescript(CREATE_TABLES_SQL)
     # 兼容旧库：添加 uploaded_at 列
+    _add_column_if_missing(conn, "books", "uploaded_at", "TEXT")
+    # 兼容旧库：添加逐页解析相关列
+    _add_column_if_missing(conn, "books", "total_pages", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "books", "parsed_pages", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "books", "failed_pages", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "books", "current_stage", "TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "books", "error_message", "TEXT DEFAULT ''")
+    conn.commit()
+    # 清理上次非正常退出留下的解析状态
+    _cleanup_stale_parse_state(conn)
+    conn.close()
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_type: str):
+    """兼容旧库：如果列不存在则添加"""
     try:
-        conn.execute("ALTER TABLE books ADD COLUMN uploaded_at TEXT")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     except Exception:
         pass
+
+
+def _cleanup_stale_parse_state(conn: sqlite3.Connection):
+    """启动时将残留的 parsing / assembling 状态统一改为 failed"""
+    conn.execute(
+        "UPDATE books SET parse_status='failed', current_stage='' "
+        "WHERE parse_status IN ('parsing', 'assembling')"
+    )
     conn.commit()
-    conn.close()
 
 
 def source_hash(text: str) -> str:

@@ -20,9 +20,25 @@ export interface Book {
   file_path: string;
   parse_status: string;
   total_chapters: number;
+  total_pages: number;
+  parsed_pages: number;
+  failed_pages: number;
+  current_stage: string;
+  error_message: string;
   created_at: string;
   uploaded_at?: string;
   chapters?: Chapter[];
+}
+
+export interface BookProgress {
+  book_id: string;
+  status: string;
+  current_stage: string;
+  total_pages: number;
+  parsed_pages: number;
+  failed_pages: number;
+  progress: number;
+  error_message: string;
 }
 
 export interface Chapter {
@@ -75,10 +91,11 @@ export const api = {
   // 书籍
   listBooks: () => request<{ books: Book[] }>("/books"),
   getBook: (id: string) => request<Book>(`/books/${id}`),
-  parseBook: (id: string) => request<{ book_id: string; chapters: number; paragraphs: number; status: string }>(
+  parseBook: (id: string) => request<{ book_id: string; status: string; total_pages?: number }>(
     `/books/${id}/parse`,
     { method: "POST" }
   ),
+  getBookProgress: (id: string) => request<BookProgress>(`/books/${id}/progress`),
 
   // 章节
   getParagraphs: (id: string) =>
