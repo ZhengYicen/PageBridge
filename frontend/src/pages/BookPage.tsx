@@ -215,7 +215,7 @@ export default function BookPage() {
                   <div className="flex-1 min-w-0">
                     <p
                       className="font-medium truncate cursor-pointer text-blue-600 hover:text-blue-800"
-                      onClick={() => navigate(`/read/${ch.id}`)}
+                      onClick={() => navigate(`/read/${bookId}?section=${ch.id}`)}
                     >
                       {ch.title}
                     </p>
@@ -249,7 +249,7 @@ export default function BookPage() {
                     )}
                     {isTransCompleted && (
                       <button
-                        onClick={() => navigate(`/read/${ch.id}`)}
+                        onClick={() => navigate(`/read/${bookId}?section=${ch.id}`)}
                         className="px-3 py-1.5 text-xs rounded-lg bg-green-100 text-green-700 hover:bg-green-200"
                       >
                         阅读

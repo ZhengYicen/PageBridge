@@ -48,7 +48,9 @@ _PUNCTUATION_ONLY_RE = re.compile(
 )
 
 _CHAPTER_PATTERNS = [
+    # 英文: Chapter 1 / Ch. 2 / Chapter 3.
     re.compile(r"^(chapter|ch\.?)\s+\d+[\.:]?\s*$", re.IGNORECASE),
+    # 英文: Chapter One / Chapter Twenty 等
     re.compile(
         r"^(chapter|ch\.?)\s+"
         r"(one|two|three|four|five|six|seven|eight|nine|ten|"
@@ -57,13 +59,24 @@ _CHAPTER_PATTERNS = [
         r"eighty|ninety|hundred)\b",
         re.IGNORECASE,
     ),
+    # 英文: Part 1 / Pt. 2
     re.compile(r"^(part|pt\.?)\s+\d+[\.:]?\s*$", re.IGNORECASE),
+    # 英文: 命名章节
     re.compile(
         r"^(introduction|preface|prologue|epilogue|appendix|index|"
         r"bibliography|foreword|acknowledgements?|about the author|"
         r"afterword|conclusion|summary|notes|references?)\b",
         re.IGNORECASE,
     ),
+    # 中文: 第X章 / 第X节 / 第X篇（阿拉伯数字）
+    re.compile(r"^第\s*[\d一二三四五六七八九十百千]+\s*[章节篇部]"),
+    # 中文: 第一部分 / 第二部 / 上卷 / 下卷
+    re.compile(r"^第\s*[\d一二三四五六七八九十百千]+\s*[部卷编]"),
+    # 中文: 前言 / 序言 / 后记 / 附录 / 目录 / 参考文献
+    re.compile(r"^(前言|序[言文]?|楔子|引[子言]|后记|尾声|附录|目录|参考文献|"
+               r"作者简介|鸣谢|致谢|写在前面|写在最后)"),
+    # 罗马数字: I. / II. / III. / IV. 等（常用于章节编号）
+    re.compile(r"^[IVXLCDM]{2,}\."),
 ]
 
 # ── Unicode 范围 ────────────────────────────────────────
@@ -220,7 +233,7 @@ class PdfParser:
             self._page_dims[p["page_number"]] = (int(p["width"]), int(p["height"]))
 
         # 收集所有行
-        all_lines = []
+        all_lines = []  
         for p in valid_pages:
             for line in p["lines"]:
                 all_lines.append(line)
@@ -228,7 +241,7 @@ class PdfParser:
         if not all_lines:
             return []
 
-        # 运行后处理管道
+        # 还原管道：统计清理 → 断词 → 自然段 → 跨页合并 → 章节检测 → 输出
         lines = self._clean_header_footer(all_lines)
         lines = self._fix_hyphenation(lines)
         paragraphs = self._reconstruct_paragraphs(lines)
@@ -853,6 +866,113 @@ class PdfParser:
             return True
         return False
 
+    def _make_source_fragments(self, para_lines: list[dict]) -> list[dict]:
+        """
+        从段落的所有 source_lines 生成 source_fragments。
+
+        按 page_number 分组，同页的相邻行聚合为同一 fragment，
+        不同页强制分开，同页非相邻区域也分开。
+        """
+        if not para_lines:
+            return []
+
+        # 按 page_number 分组
+        page_groups: dict[int, list[dict]] = defaultdict(list)
+        for line in para_lines:
+            page_groups[line["page_number"]].append(line)
+
+        fragments = []
+        frag_order = 0
+
+        for page_num in sorted(page_groups.keys()):
+            page_lines = page_groups[page_num]
+            w, h = self._page_dims.get(page_num, (None, None))
+
+            # 同页内按 y1 排序
+            page_lines.sort(key=lambda x: x["bbox"]["y1"])
+
+            # 检查是否有明显垂直间隔 → 拆分为多个 fragment
+            current_group = [page_lines[0]]
+            for i in range(1, len(page_lines)):
+                prev = page_lines[i - 1]
+                curr = page_lines[i]
+                gap = curr["bbox"]["y1"] - prev["bbox"]["y2"]
+                prev_h = prev["bbox"]["y2"] - prev["bbox"]["y1"]
+                # 间距 > 行高 → 视为不同区域
+                if prev_h > 0 and gap > prev_h * 1.5:
+                    # 完成当前组
+                    frag = self._build_single_fragment(
+                        current_group, page_num, frag_order, w, h
+                    )
+                    if frag:
+                        fragments.append(frag)
+                        frag_order += 1
+                    current_group = [curr]
+                else:
+                    current_group.append(curr)
+
+            if current_group:
+                frag = self._build_single_fragment(
+                    current_group, page_num, frag_order, w, h
+                )
+                if frag:
+                    fragments.append(frag)
+                    frag_order += 1
+
+        return fragments
+
+    def _build_single_fragment(
+        self, lines: list[dict], page_number: int,
+        frag_order: int, page_w: float | None, page_h: float | None
+    ) -> dict | None:
+        """从一组同页连续行构建单个 source_fragment。"""
+        if not lines:
+            return None
+
+        text = " ".join(l["text"].strip() for l in lines if l["text"].strip())
+        if not text:
+            return None
+
+        bbox = {
+            "x1": min(l["bbox"]["x1"] for l in lines),
+            "y1": min(l["bbox"]["y1"] for l in lines),
+            "x2": max(l["bbox"]["x2"] for l in lines),
+            "y2": max(l["bbox"]["y2"] for l in lines),
+        }
+
+        # Normalized bbox (0~1)
+        norm = {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+        if page_w and page_h and page_w > 0 and page_h > 0:
+            norm = {
+                "x1": round(bbox["x1"] / page_w, 6),
+                "y1": round(bbox["y1"] / page_h, 6),
+                "x2": round(bbox["x2"] / page_w, 6),
+                "y2": round(bbox["y2"] / page_h, 6),
+            }
+        elif page_w and page_w > 0:
+            norm["x1"] = round(bbox["x1"] / page_w, 6)
+            norm["x2"] = round(bbox["x2"] / page_w, 6)
+
+        total_len = sum(len(l["text"]) for l in lines)
+        avg_conf = sum(l["confidence"] * len(l["text"]) for l in lines) / total_len if total_len > 0 else 0.0
+
+        parse_methods = set(l.get("parse_method", "") for l in lines if l.get("parse_method"))
+        method = list(parse_methods)[0] if len(parse_methods) == 1 else (list(parse_methods)[0] if parse_methods else "")
+
+        return {
+            "pdf_page_index": page_number - 1,  # 0-based
+            "pdf_page_number": page_number,      # 1-based
+            "bbox": json.dumps(bbox, ensure_ascii=False),
+            "bbox_normalized": json.dumps(norm, ensure_ascii=False),
+            "original_page_width": page_w or 0,
+            "original_page_height": page_h or 0,
+            "fragment_order": frag_order,
+            "source_text": text,
+            "confidence": round(avg_conf, 4),
+            "parse_method": method,
+            "line_order": 0,
+        }
+
     def _merge_para_lines(self, para_lines: list[dict]) -> dict:
         text_parts = []
         for i, line in enumerate(para_lines):
@@ -862,26 +982,24 @@ class PdfParser:
             text_parts.append((" " + t) if (i > 0 and text_parts) else t)
         merged = self._clean_text("".join(text_parts))
 
-        bbox = {
-            "x1": min(l["bbox"]["x1"] for l in para_lines),
-            "y1": min(l["bbox"]["y1"] for l in para_lines),
-            "x2": max(l["bbox"]["x2"] for l in para_lines),
-            "y2": max(l["bbox"]["y2"] for l in para_lines),
-        }
-        pns = [l["page_number"] for l in para_lines]
-        start, end = min(pns), max(pns)
+        pns = [l["page_number"] for l in para_lines if l.get("page_number")]
+        start = min(pns) if pns else 0
+        end = max(pns) if pns else 0
         total_len = sum(len(l["text"]) for l in para_lines)
         avg_conf = (sum(l["confidence"] * len(l["text"]) for l in para_lines) / total_len
                     if total_len > 0 else 0.0)
+
+        # 生成 source_fragments（按页分组，同页非连续区域分开）
+        source_fragments = self._make_source_fragments(para_lines)
 
         return {
             "text": merged,
             "html": f"<p>{html_mod.escape(merged)}</p>",
             "page_number": start,
             "page_end": end,
-            "bbox": json.dumps(bbox, ensure_ascii=False),
             "confidence": round(avg_conf, 4),
             "source_lines": para_lines,
+            "source_fragments": source_fragments,
             "is_centered": self._is_centered_text(
                 para_lines[0],
                 self._page_dims.get(para_lines[0]["page_number"], (None, None))[0],
@@ -915,17 +1033,21 @@ class PdfParser:
                     cur["text"] = merged_text
                     cur["html"] = f"<p>{html_mod.escape(merged_text)}</p>"
                     cur["page_end"] = nxt["page_end"]
-                    try:
-                        cb = json.loads(cur["bbox"])
-                        nb = json.loads(nxt["bbox"])
-                        cur["bbox"] = json.dumps({
-                            "x1": min(cb["x1"], nb["x1"]),
-                            "y1": min(cb["y1"], nb["y1"]),
-                            "x2": max(cb["x2"], nb["x2"]),
-                            "y2": max(cb["y2"], nb["y2"]),
-                        }, ensure_ascii=False)
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+
+                    # 合并 source_fragments（追加，不合并 bbox）
+                    cur_frags = cur.get("source_fragments", [])
+                    nxt_frags = nxt.get("source_fragments", [])
+                    # 重新编号 fragment_order
+                    max_order = max((f.get("fragment_order", 0) for f in cur_frags), default=0)
+                    for frag in nxt_frags:
+                        frag["fragment_order"] = max_order + 1 + frag.get("fragment_order", 0)
+                    cur["source_fragments"] = cur_frags + nxt_frags
+
+                    # 合并 source_lines
+                    cur_lines = cur.get("source_lines", [])
+                    nxt_lines = nxt.get("source_lines", [])
+                    cur["source_lines"] = cur_lines + nxt_lines
+
                     l1, l2 = len(ct), len(nt)
                     if l1 + l2 > 0:
                         cur["confidence"] = round(
@@ -941,6 +1063,18 @@ class PdfParser:
     # ── 10. 章节标题识别 ──────────────────────────────────
 
     def _detect_chapters(self, paragraphs: list[dict]) -> list[dict[str, Any]]:
+        """
+        章节检测 — 仅使用模式匹配。
+
+        匹配规则（按优先级）：
+        1. 明确章节号: Chapter 1, Ch. 2, 第3章, Part One
+        2. 命名章节: Introduction, Preface, 前言, 序言 等
+        3. camelCase 分词恢复: ChapterOne → Chapter One
+        4. 无法识别 → 全部放入 "全文"
+
+        注意：第一个章节匹配之前的正文不会丢失——
+        它们会被放入一个虚拟的 "Front Matter" 章节中。
+        """
         if not paragraphs:
             return [{"title": "全文", "chapter_order": 0, "paragraphs": []}]
 
@@ -952,28 +1086,17 @@ class PdfParser:
             text = para["text"].strip()
             if not text:
                 continue
+
+            # 尝试原始文本匹配
             is_match = any(pat.match(text) for pat in _CHAPTER_PATTERNS)
+
+            # camelCase 分词后再次尝试
             if not is_match:
                 st = _camel_split(text)
                 if st != text:
                     is_match = any(pat.match(st) for pat in _CHAPTER_PATTERNS)
+
             if is_match:
-                chapter_indices.append(i)
-                continue
-            if text[-1] in ".!?":
-                continue
-            is_centered = para.get("is_centered", False)
-            is_short = len(text) < 80
-            has_gap = False
-            if i > 0:
-                try:
-                    prev_bottom = json.loads(paragraphs[i - 1]["bbox"]).get("y2", 0)
-                    curr_top = json.loads(para["bbox"]).get("y1", 0)
-                    if prev_bottom > 0 and (curr_top - prev_bottom) > 30:
-                        has_gap = True
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            if sum([is_centered, is_short, has_gap]) >= 2 and is_short:
                 chapter_indices.append(i)
 
         if not chapter_indices:
@@ -981,13 +1104,25 @@ class PdfParser:
                      "paragraphs": [p for p in paragraphs if p["text"].strip()]}]
 
         chapters = []
+        # 第一个章节匹配前的段落 → "Front Matter"
+        if chapter_indices[0] > 0:
+            front_paras = [p for p in paragraphs[:chapter_indices[0]] if p["text"].strip()]
+            if front_paras:
+                chapters.append({
+                    "title": "Front Matter",
+                    "chapter_order": 0,
+                    "paragraphs": front_paras,
+                })
+
         for idx, start in enumerate(chapter_indices):
             end = (chapter_indices[idx + 1] if idx + 1 < len(chapter_indices)
                    else len(paragraphs))
+            title = paragraphs[start]["text"].strip()
+            content = [p for p in paragraphs[start + 1:end] if p["text"].strip()]
             chapters.append({
-                "title": paragraphs[start]["text"].strip(),
-                "chapter_order": idx,
-                "paragraphs": [p for p in paragraphs[start + 1:end] if p["text"].strip()],
+                "title": title,
+                "chapter_order": len(chapters),
+                "paragraphs": content,
             })
         return chapters
 
@@ -999,15 +1134,16 @@ class PdfParser:
         for ch in chapters:
             chapter_paras = []
             for order, para in enumerate(ch.get("paragraphs", [])):
-                chapter_paras.append({
+                entry = {
                     "text": para["text"],
                     "html": para["html"],
                     "paragraph_order": order,
                     "page_number": para["page_number"],
                     "page_end": para["page_end"],
-                    "bbox": para["bbox"],
                     "confidence": para["confidence"],
-                })
+                    "source_fragments": para.get("source_fragments", []),
+                }
+                chapter_paras.append(entry)
             output.append({
                 "title": ch["title"],
                 "chapter_order": ch["chapter_order"],

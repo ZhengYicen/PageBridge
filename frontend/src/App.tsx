@@ -17,11 +17,19 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
+      <main className="flex-1">
         <Routes>
-          <Route path="/" element={<UploadPage />} />
-          <Route path="/books/:bookId" element={<BookPage />} />
-          <Route path="/read/:chapterId" element={<ReaderPage />} />
+          <Route path="/" element={
+            <div className="max-w-6xl mx-auto w-full px-4 py-6">
+              <UploadPage />
+            </div>
+          } />
+          <Route path="/books/:bookId" element={
+            <div className="max-w-6xl mx-auto w-full px-4 py-6">
+              <BookPage />
+            </div>
+          } />
+          <Route path="/read/:bookId" element={<ReaderPage />} />
         </Routes>
       </main>
     </div>

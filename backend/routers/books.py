@@ -192,6 +192,112 @@ async def serve_book_asset(book_id: str, asset_path: str):
     return FileResponse(requested)
 
 
+@router.get("/books/{book_id}/pdf")
+async def serve_book_pdf(book_id: str):
+    """提供原始 PDF 文件流（用于 PDF.js 加载）"""
+    conn = get_connection()
+    book = row_to_dict(conn.execute(
+        "SELECT file_path FROM books WHERE id=?", (book_id,)
+    ).fetchone())
+    conn.close()
+
+    if not book:
+        raise HTTPException(404, "书籍不存在")
+
+    pdf_path = Path(book["file_path"])
+    if not pdf_path.exists():
+        raise HTTPException(404, "PDF 文件不存在")
+
+    return FileResponse(pdf_path, media_type="application/pdf")
+
+
+@router.get("/books/{book_id}/read")
+async def get_reader_info(book_id: str):
+    """获取阅读页初始化信息（书籍元数据 + 章节/全文列表）"""
+    conn = get_connection()
+    book = row_to_dict(conn.execute(
+        "SELECT id, title, format, total_pages, parse_status FROM books WHERE id=?",
+        (book_id,),
+    ).fetchone())
+    if not book:
+        conn.close()
+        raise HTTPException(404, "书籍不存在")
+
+    # 获取所有章节（作为 sections）
+    chapters = conn.execute(
+        "SELECT id, title, chapter_order, paragraph_count FROM chapters "
+        "WHERE book_id=? ORDER BY chapter_order",
+        (book_id,),
+    ).fetchall()
+
+    sections = []
+    cumulative_offset = 0
+    for ch in chapters:
+        ch_dict = dict(ch)
+        # 获取该 section 的 page_start 和 page_end
+        p_start = conn.execute(
+            "SELECT MIN(page_number) as ps FROM paragraphs WHERE chapter_id=?",
+            (ch_dict["id"],),
+        ).fetchone()["ps"]
+        p_end = conn.execute(
+            "SELECT MAX(page_end) as pe FROM paragraphs WHERE chapter_id=?",
+            (ch_dict["id"],),
+        ).fetchone()["pe"]
+        sections.append({
+            "section_id": ch_dict["id"],
+            "title": ch_dict["title"],
+            "paragraph_count": ch_dict["paragraph_count"] or 0,
+            "start_paragraph_order": cumulative_offset,
+            "page_start": p_start or 0,
+            "page_end": p_end or 0,
+        })
+        cumulative_offset += ch_dict["paragraph_count"] or 0
+
+    # 添加虚拟 "全文" section（包含所有段落）
+    full_count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM paragraphs p "
+        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+        (book_id,),
+    ).fetchone()["cnt"]
+    full_page_start = conn.execute(
+        "SELECT MIN(page_number) as ps FROM paragraphs p "
+        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+        (book_id,),
+    ).fetchone()["ps"]
+    full_page_end = conn.execute(
+        "SELECT MAX(page_end) as pe FROM paragraphs p "
+        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+        (book_id,),
+    ).fetchone()["pe"]
+
+    conn.close()
+
+    pdf_url = f"/api/books/{book_id}/pdf"
+    total_pages = book["total_pages"] or 0
+
+    # 虚拟 section 放在第一个（默认加载）
+    virtual_section = {
+        "section_id": "__full__",
+        "title": "全文",
+        "paragraph_count": full_count or 0,
+        "page_start": full_page_start or 1,
+        "page_end": full_page_end or total_pages,
+    }
+
+    return {
+        "book": {
+            "id": book["id"],
+            "title": book["title"],
+            "format": book["format"],
+            "total_pages": total_pages,
+            "pdf_url": pdf_url,
+            "parse_status": book["parse_status"],
+        },
+        "total_pages": total_pages,
+        "sections": [virtual_section] + sections,
+    }
+
+
 # ═══════════════════════════════════════════════════════════
 # 内部函数
 # ═══════════════════════════════════════════════════════════
@@ -216,6 +322,10 @@ def _clean_book_parse_data(book_id: str):
         if para_ids:
             pid_placeholders = ",".join("?" * len(para_ids))
             pids = [r["id"] for r in para_ids]
+            # 删除关联的 source_fragments
+            conn.execute(
+                f"DELETE FROM paragraph_source_fragments WHERE paragraph_id IN ({pid_placeholders})", pids
+            )
             conn.execute(
                 f"DELETE FROM translations WHERE paragraph_id IN ({pid_placeholders})", pids
             )
@@ -358,18 +468,45 @@ def _parse_book_background(
                 conn.execute(
                     "INSERT INTO paragraphs "
                     "(id, chapter_id, paragraph_order, source_text, source_html, "
-                    "page_number, source_bbox, status) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "page_number, page_start, page_end, source_bbox, status) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         para_id, chapter_id,
                         para.get("paragraph_order", 0),
                         para.get("text", ""),
                         para.get("html", ""),
                         para.get("page_number", 0),
-                        para.get("bbox", ""),
+                        para.get("page_number", 0),
+                        para.get("page_end", para.get("page_number", 0)),
+                        "",  # source_bbox kept for compatibility
                         "pending",
                     ),
                 )
+
+                # 保存 source_fragments
+                fragments = para.get("source_fragments", [])
+                for frag in fragments:
+                    conn.execute(
+                        "INSERT INTO paragraph_source_fragments "
+                        "(paragraph_id, pdf_page_index, pdf_page_number, bbox, bbox_normalized, "
+                        "original_page_width, original_page_height, fragment_order, source_text, "
+                        "confidence, parse_method) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            para_id,
+                            frag.get("pdf_page_index", 0),
+                            frag.get("pdf_page_number", 0),
+                            frag.get("bbox", "{}"),
+                            frag.get("bbox_normalized", "{}"),
+                            frag.get("original_page_width", 0),
+                            frag.get("original_page_height", 0),
+                            frag.get("fragment_order", 0),
+                            frag.get("source_text", ""),
+                            frag.get("confidence", 0.0),
+                            frag.get("parse_method", ""),
+                        ),
+                    )
+
                 paragraph_count += 1
             chapter_count += 1
 

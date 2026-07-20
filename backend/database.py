@@ -110,6 +110,27 @@ CREATE INDEX IF NOT EXISTS idx_glossary_book_id ON glossary(book_id);
 CREATE INDEX IF NOT EXISTS idx_translations_source_hash ON translations(source_hash);
 CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragraph_id);
 CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
+
+CREATE TABLE IF NOT EXISTS paragraph_source_fragments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paragraph_id TEXT NOT NULL REFERENCES paragraphs(id),
+    pdf_page_index INTEGER NOT NULL,
+    pdf_page_number INTEGER NOT NULL,
+    bbox TEXT NOT NULL,
+    bbox_normalized TEXT NOT NULL,
+    original_page_width REAL NOT NULL,
+    original_page_height REAL NOT NULL,
+    fragment_order INTEGER NOT NULL DEFAULT 0,
+    source_text TEXT DEFAULT '',
+    confidence REAL DEFAULT 0,
+    parse_method TEXT DEFAULT '',
+    book_page_id INTEGER DEFAULT 0,
+    line_order INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_frags_para ON paragraph_source_fragments(paragraph_id);
+CREATE INDEX IF NOT EXISTS idx_source_frags_page ON paragraph_source_fragments(pdf_page_index);
 """
 
 
@@ -135,6 +156,12 @@ def init_db():
     _add_column_if_missing(conn, "books", "failed_pages", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "books", "current_stage", "TEXT DEFAULT ''")
     _add_column_if_missing(conn, "books", "error_message", "TEXT DEFAULT ''")
+    # 兼容旧库：添加 paragraph 来源相关列
+    _add_column_if_missing(conn, "paragraphs", "page_end", "INTEGER")
+    _add_column_if_missing(conn, "paragraphs", "page_start", "INTEGER")
+    # 兼容旧库：添加 book_pages 索引相关列
+    _add_column_if_missing(conn, "book_pages", "page_index", "INTEGER")
+    _add_column_if_missing(conn, "book_pages", "rotation", "INTEGER")
     conn.commit()
     # 清理上次非正常退出留下的解析状态
     _cleanup_stale_parse_state(conn)

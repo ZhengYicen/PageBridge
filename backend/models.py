@@ -91,6 +91,69 @@ class TranslateRequest(BaseModel):
 
 
 # --- 解析结果 ---
+# --- 来源片段 ---
+class SourceFragmentResponse(BaseModel):
+    pdf_page_index: int
+    pdf_page_number: int
+    bbox: str  # JSON string: {x1,y1,x2,y2} in 200 DPI pixels
+    bbox_normalized: str  # JSON string: 0~1 coordinates
+    original_page_width: float
+    original_page_height: float
+    fragment_order: int
+    source_text: str = ""
+    confidence: float = 0
+
+
+# --- 阅读段落的详细版本（含 fragments）---
+class ReadingParagraphResponse(BaseModel):
+    id: str
+    paragraph_order: int
+    source_text: str
+    source_html: str = ""
+    translation: str = ""
+    status: str
+    error_message: str = ""
+    page_number: int = 0
+    page_start: int = 0
+    page_end: Optional[int] = None
+    source_fragments: list[SourceFragmentResponse] = []
+
+
+# --- 阅读页 Section ---
+class ReadingSectionResponse(BaseModel):
+    section_id: str
+    title: str
+    paragraph_count: int = 0
+    page_start: int = 0
+    page_end: int = 0
+
+
+# --- 阅读页书籍信息 ---
+class ReadingBookInfoResponse(BaseModel):
+    id: str
+    title: str
+    format: str
+    total_pages: int = 0
+    pdf_url: str = ""
+    parse_status: str = ""
+
+
+# --- 阅读页初始化信息 ---
+class ReaderInfoResponse(BaseModel):
+    book: ReadingBookInfoResponse
+    total_pages: int
+    sections: list[ReadingSectionResponse]
+
+
+# --- 分页段落响应 ---
+class PaginatedParagraphsResponse(BaseModel):
+    section_id: str
+    paragraphs: list[ReadingParagraphResponse]
+    total: int
+    offset: int
+    limit: int
+
+
 class ParseResult(BaseModel):
     """解析一本书后的结果摘要"""
     book_id: str

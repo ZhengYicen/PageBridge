@@ -78,6 +78,64 @@ export interface Job {
   updated_at: string;
 }
 
+// ── 阅读页类型 ──────────────────────────────────────
+
+export interface SourceFragment {
+  pdf_page_index: number;
+  pdf_page_number: number;
+  bbox: string;
+  bbox_normalized: string;
+  original_page_width: number;
+  original_page_height: number;
+  fragment_order: number;
+  source_text: string;
+  confidence: number;
+}
+
+export interface ReadingParagraph {
+  id: string;
+  paragraph_order: number;
+  source_text: string;
+  source_html: string;
+  translation: string;
+  status: string;
+  error_message: string;
+  page_number: number;
+  page_start: number;
+  page_end: number;
+  source_fragments: SourceFragment[];
+}
+
+export interface ReadingSection {
+  section_id: string;
+  title: string;
+  paragraph_count: number;
+  start_paragraph_order: number;
+  page_start: number;
+  page_end: number;
+}
+
+export interface ReaderInfo {
+  book: {
+    id: string;
+    title: string;
+    format: string;
+    total_pages: number;
+    pdf_url: string;
+    parse_status: string;
+  };
+  total_pages: number;
+  sections: ReadingSection[];
+}
+
+export interface PaginatedParagraphs {
+  section_id: string;
+  paragraphs: ReadingParagraph[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 export const api = {
   // 上传
   upload: async (file: File) => {
@@ -141,4 +199,21 @@ export const api = {
     es.onerror = () => es.close();
     return () => es.close();
   },
+
+  // ── 阅读页 ──────────────────────────────────────────
+
+  /** 获取阅读页初始化信息 */
+  getReaderInfo: (bookId: string) =>
+    request<ReaderInfo>(`/books/${bookId}/read`),
+
+  /** 获取某个 section 的段落（分页，含 source_fragments） */
+  getSectionParagraphs: (
+    bookId: string,
+    sectionId: string,
+    offset = 0,
+    limit = 50,
+  ) =>
+    request<PaginatedParagraphs>(
+      `/books/${bookId}/sections/${sectionId}/paragraphs?offset=${offset}&limit=${limit}`,
+    ),
 };
