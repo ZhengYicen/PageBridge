@@ -9,7 +9,7 @@ export default function App() {
       <header className="bg-white border-b shadow-sm">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
           <Link to="/" className="text-xl font-bold text-blue-600 hover:text-blue-700">
-            📖 AI 双语阅读器
+            📖 PageBridge
           </Link>
           <nav className="ml-auto text-sm text-gray-500">
             <Link to="/" className="hover:text-blue-600">首页</Link>

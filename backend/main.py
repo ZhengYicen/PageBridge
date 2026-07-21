@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="AI 双语阅读器",
+    title="PageBridge",
     description="上传英文书籍 → 解析结构 → 选择章节 → 自动翻译 → 双语对照阅读",
     version="0.1.0",
     lifespan=lifespan,

@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title AI 双语阅读器
+title PageBridge
 
 echo ========================================
-echo   📖 AI 双语阅读器 — 一键启动
+echo   📖 PageBridge — 一键启动
 echo ========================================
 echo.
 

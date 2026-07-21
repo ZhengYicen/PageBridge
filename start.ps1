@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  AI Bilingual Reader - Quick Start" -ForegroundColor Cyan
+Write-Host "  PageBridge - Quick Start" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

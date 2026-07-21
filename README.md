@@ -1,41 +1,141 @@
-# 📖 AI 双语阅读器
+# 📖 PageBridge
 
-上传英文书（PDF/EPUB）→ 解析结构 → 选择章节 → 自动翻译 → 双语对照阅读。
+**Bilingual reading, reimagined.** Upload English books (PDF/EPUB), auto-parse structure, browse chapters, batch-translate into Chinese, and read side-by-side with an integrated PDF viewer.
 
-## 快速开始
+> 🚧 **Actively developed.** The focus is PDF with OCR — EPUB is supported but has had less battle testing.
 
-### 前置条件
+---
+
+## ✨ Features
+
+| | Feature | Description |
+|---|---|---|
+| 📤 | **Smart Upload** | Drag & drop PDF or EPUB files |
+| 🔍 | **Intelligent Parsing** | PDF: native text extraction → RapidOCR fallback with auto DPI retry. EPUB: semantic extraction via spine/TOC |
+| 🌐 | **Batch Translation** | LLM-powered (DeepSeek / OpenAI / Qwen). 8 paragraphs per request, cached via `source_hash` |
+| 📖 | **Bilingual Reader** | Three-column layout: PDF viewer + English text + Chinese translation |
+| 🔗 | **PDF–Text Linking** | Scroll the text → PDF auto-flips to the right page and highlights the paragraph region |
+| ⏸️ | **Follow Control** | Manually browsing PDF pauses auto-follow; "Resume" snaps back to the active paragraph |
+| ⚡ | **Background Jobs** | Parse books page-by-page with progress push; translate asynchronously with pause/resume/retry via SSE |
+| 📚 | **Chapter Navigation** | Auto-detect chapter boundaries. Jump to any chapter, or read the full book as one continuous scroll |
+| 🎯 | **Cached Translations** | MD5-hash-based translation cache — re-parsing a book re-matches existing translations by text content |
+
+---
+
+## 🖼️ Screenshots
+
+<details>
+<summary><b>Upload page</b></summary>
+
+A clean drag-and-drop upload zone with a list of uploaded books showing parsing status and quick actions (open / re-parse / delete).
+
+</details>
+
+<details>
+<summary><b>Book detail page</b></summary>
+
+Shows book metadata, parsing progress bar, and a chapter list with per-chapter translate / pause / read buttons. Translation progress updates in real-time via SSE.
+
+</details>
+
+<details>
+<summary><b>Reader (three-column layout)</b></summary>
+
+```
+┌─────────────┬──────────────────┬──────────────────┐
+│  PDF Viewer  │  English Text     │  Chinese Translation │
+│  (32%)       │  (34%)            │  (34%)               │
+│              │                   │                      │
+│  [page]      │  Paragraph 1      │  段落 1              │
+│  highlights  │  Paragraph 2      │  段落 2              │
+│              │  ...              │  ...                 │
+│  ◀ 3/274 ▶   │                   │                      │
+├──────────────┴──────────────────┴──────────────────┤
+│ ● 联动中      已翻译 142/210 段                       │
+└─────────────────────────────────────────────────────┘
+```
+
+- Scroll English/Chinese text together as one scrollable column
+- Active paragraph is highlighted; its PDF source page auto-opens
+- PDF region shows semi-transparent yellow highlight over the original paragraph area
+- Zoom in/out, keyboard navigation (↑↓ / PageUp / PageDown)
+
+</details>
+
+---
+
+## 🧱 Architecture
+
+```
+┌──────────────┐    ┌──────────────────────────────────┐
+│   Browser    │    │  FastAPI Backend (port 8000)      │
+│  (React 18)  │    │                                  │
+│              │    │  ┌──────────┐  ┌──────────────┐  │
+│  UploadPage  │────┼─▶│ Routers  │  │ Parsers       │  │
+│  BookPage    │    │  │          │  │              │  │
+│  ReaderPage  │    │  │ upload   │  │ PdfParser    │  │
+│              │    │  │ books    │  │  ├─ RapidOCR  │  │
+│  PdfViewer   │    │  │ chapters │  │  └─ PyMuPDF   │  │
+│  (pdfjs-dist)│    │  │ jobs     │  │              │  │
+│              │    │  │ paragraphs│  │ EpubParser   │  │
+│              │    │  └──────────┘  └──────────────┘  │
+│              │    │                                  │
+│              │    │  ┌──────────┐  ┌──────────────┐  │
+│              │    │  │Worker    │  │LLM Client    │  │
+│              │    │  │(asyncio) │──│(httpx)       │  │
+│              │    │  │JobManager│  │DeepSeek/... │  │
+│              │    │  └──────────┘  └──────────────┘  │
+│              │    │                                  │
+│              │    │  ┌──────────────────────────────┐ │
+│              │    │  │  SQLite (storage/app.db)     │ │
+│              │    │  │  books / chapters / paras    │ │
+│              │    │  │  translations / jobs / pages │ │
+│              │    │  └──────────────────────────────┘ │
+└──────────────┘    └──────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+- **PDF parsing**: Native text extraction first (PyMuPDF); falls back to RapidOCR for scanned pages. Auto-retries at higher DPI when quality is insufficient. Two-phase: parse page-by-page → assemble into chapters and paragraphs.
+- **EPUB parsing**: Reads documents in spine order, builds a semantic block stream (paragraphs / headings / images / quotes), locates TOC entries as cut points, then slices into chapters.
+- **Paragraph sources**: Each paragraph stores `source_fragments` — one per contiguous region on a PDF page (cross-page paragraphs merge their fragment lists). Each fragment carries absolute + normalized bbox coordinates for PDF highlight overlay.
+- **Translation pipeline**: Chapter → batch (8 paras) → cache lookup → API call → per-paragraph DB write. Cache keyed by MD5 of source text, so re-parsing a book preserves existing translations.
+- **Pagination**: Reader loads 50 paragraphs at a time, infinite-scroll. All sections share one virtual `__full__` section that concatenates every chapter.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
 
 - Python 3.10+
 - Node.js 18+
-- （可选）Docker + NVIDIA GPU — 用于 PDF 扫描版解析（MinerU）
+- An LLM API key (DeepSeek recommended; also supports OpenAI / Qwen)
 
-### 1. 配置 API Key
+### 1. Clone & configure
 
 ```bash
-# 复制配置模板
+git clone https://github.com/your-username/pagebridge.git
+cd pagebridge
+
 cp .env.example .env
+# Edit .env — set your DEEPSEEK_API_KEY
 ```
 
-编辑 `.env`，填入你的 DeepSeek API Key：
-
-```env
-DEEPSEEK_API_KEY=sk-your-key-here
-```
-
-> 也支持 OpenAI / Qwen / GLM，切换 `LLM_PROVIDER` 并设置对应的 API Key 即可。
-
-### 2. 启动后端
+### 2. Start backend
 
 ```bash
-cd backend
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # macOS / Linux
+
+pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-API 文档自动可用：http://localhost:8000/docs
+API docs: http://localhost:8000/docs
 
-### 3. 启动前端（新开一个终端）
+### 3. Start frontend
 
 ```bash
 cd frontend
@@ -43,88 +143,140 @@ npm install
 npm run dev
 ```
 
-打开 http://localhost:5173
+Open http://localhost:5173
 
-### 4. （可选）启动 MinerU — PDF 扫描版解析
+### 4. Use it
 
-```bash
-docker compose --profile mineru up -d
+1. Drop a PDF or EPUB onto the upload area
+2. Click the book → **Parse** button (page-by-page OCR/text extraction)
+3. Once parsing completes, click **Translate** on a chapter
+4. When translation finishes, click **Read** to open the bilingual reader
+
+---
+
+## ⚙️ Configuration
+
+All config lives in `.env` (copy from `.env.example`):
+
+```env
+# ── LLM ──────────────────────────────────────
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-...
+LLM_MODEL=deepseek-chat
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_TEMPERATURE=0.3
+LLM_MAX_TOKENS=2048
+
+# Also supports OpenAI / Qwen — see .env.example
 ```
 
-> MinerU 镜像约 10GB，首次启动需下载模型。如无 GPU，设置环境变量 `MINERU_URL=http://localhost:8000` 并用 CPU 模式启动 MinerU（详见 MinerU 文档）。
+---
 
-## 项目结构
+## 📁 Project Structure
 
 ```
-ai-reader/
+pagebridge/
 ├── backend/
-│   ├── main.py              # FastAPI 入口
-│   ├── config.py            # 配置
-│   ├── database.py          # SQLite 数据库
-│   ├── models.py            # 数据模型
+│   ├── main.py              # FastAPI entry point
+│   ├── config.py            # Environment config
+│   ├── database.py          # SQLite init + migrations
+│   ├── models.py            # Pydantic request/response schemas
 │   ├── routers/
-│   │   ├── upload.py        # 文件上传
-│   │   ├── books.py         # 书籍/章节 API
-│   │   ├── chapters.py      # 翻译启停
-│   │   └── jobs.py          # 任务管理 + SSE
+│   │   ├── upload.py        # File upload endpoint
+│   │   ├── books.py         # Book CRUD, parse, progress, reader info
+│   │   ├── chapters.py      # Chapter paragraphs + translate trigger
+│   │   ├── paragraphs.py    # Section paragraphs (paginated, with fragments)
+│   │   └── jobs.py          # Job status + SSE progress stream
 │   ├── parsers/
-│   │   ├── epub_parser.py   # EPUB 解析
-│   │   └── pdf_parser.py    # PDF 解析（MinerU + PyMuPDF fallback）
+│   │   ├── pdf_parser.py    # PDF parser (RapidOCR + PyMuPDF)
+│   │   └── epub_parser.py   # EPUB parser (ebooklib + BeautifulSoup)
 │   ├── agents/
-│   │   ├── llm_client.py    # LLM 统一调用层
-│   │   └── translator.py    # TranslatorAgent
-│   ├── worker.py            # 后台任务管理
+│   │   ├── llm_client.py    # Unified LLM API client (httpx)
+│   │   └── translator.py    # Batch translator with cache
+│   ├── worker.py            # Async job manager (translate jobs)
+│   ├── scripts/
+│   │   └── migrate_paragraphs.py  # Data migration tool
 │   └── prompts/
-│       └── translate.txt    # 翻译 prompt
+│       └── translate.txt    # Translation system prompt
 ├── frontend/
 │   ├── src/
+│   │   ├── App.tsx          # Shell + routing + nav bar
 │   │   ├── pages/
-│   │   │   ├── UploadPage.tsx   # 上传页
-│   │   │   ├── BookPage.tsx     # 书籍详情 + 章节列表
-│   │   │   └── ReaderPage.tsx   # 双语阅读页
-│   │   └── api/client.ts        # API 封装
-│   └── ...
-├── storage/                 # 上传文件 + 数据库
+│   │   │   ├── UploadPage.tsx   # Upload + book list
+│   │   │   ├── BookPage.tsx     # Book detail + chapter list
+│   │   │   └── ReaderPage.tsx   # Bilingual reader (three-column)
+│   │   ├── components/
+│   │   │   └── PdfViewer.tsx    # PDF.js canvas renderer + highlights
+│   │   ├── lib/
+│   │   │   └── pdfAdapter.ts    # Page number conversion layer
+│   │   └── api/
+│   │       └── client.ts        # API client
+│   └── index.html
+├── storage/                 # Uploaded files, database, backups
+│   ├── uploads/
+│   ├── books/
+│   └── app.db
 ├── docker-compose.yml
+├── Dockerfile.backend
+├── Dockerfile.frontend
 └── .env.example
 ```
 
-## 核心设计
+---
 
-### 翻译流程
+## 🧪 Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **Frontend** | React 18, React Router 6, TypeScript, Tailwind CSS, Vite |
+| **PDF Rendering** | pdfjs-dist 4.0 (canvas rendering + overlay highlights) |
+| **Backend** | Python 3.11+, FastAPI, Uvicorn, Pydantic v2 |
+| **Database** | SQLite (WAL mode, with migration helpers) |
+| **PDF Parsing** | RapidOCR (ONNX Runtime) + PyMuPDF (fitz) |
+| **EPUB Parsing** | ebooklib + BeautifulSoup 4 + lxml |
+| **LLM Client** | httpx (async), OpenAI-compatible API |
+| **Infrastructure** | Docker, Docker Compose |
+
+---
+
+## 📊 Database Schema (key tables)
 
 ```
-用户选择章节 → 创建翻译任务 → 后台逐段翻译
-                                ↓
-                     每翻一段写入数据库（断点续译）
-                                ↓
-                     暂停/继续/失败重试
+books            → chapters       → paragraphs      → paragraph_source_fragments
+                                      ↕ translations (cached)
+                  book_pages (per-page parse results)
+                  jobs (translate jobs with progress)
+                  glossary (terms → custom translations)
 ```
 
-### 段落级双语对照
+---
 
-- 原文和译文通过 `paragraph_id` 一一对应
-- 左栏英文，右栏中文
-- 滚动同步（IntersectionObserver）
-- 点击段落高亮对应段落
+## 👨‍💻 Development
 
-### PDF 解析策略
+```bash
+# Backend (hot-reload)
+uvicorn backend.main:app --reload --port 8000
 
-1. **首选**：MinerU API（Docker 部署）— 处理扫描版、复杂排版
-2. **Fallback**：PyMuPDF — 处理可复制文本 PDF
+# Frontend (HMR on port 5173, proxies /api → :8000)
+cd frontend && npm run dev
+```
 
-## API 概览
+The Vite dev server proxies `/api` to the backend. Default backend port is 8000; adjust `frontend/vite.config.ts` if yours differs.
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/upload` | POST | 上传 EPUB/PDF |
-| `/api/books` | GET | 书籍列表 |
-| `/api/books/{id}` | GET | 书籍详情 + 章节 |
-| `/api/books/{id}/parse` | POST | 解析书籍 |
-| `/api/chapters/{id}/paragraphs` | GET | 获取段落 |
-| `/api/chapters/{id}/translate` | POST | 启动翻译 |
-| `/api/jobs/{id}` | GET | 任务状态 |
-| `/api/jobs/{id}/pause` | POST | 暂停 |
-| `/api/jobs/{id}/resume` | POST | 继续 |
-| `/api/jobs/{id}/retry` | POST | 重试失败段 |
-| `/api/jobs/{id}/progress` | GET | SSE 进度流 |
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! This project is in active development. Areas that would benefit most:
+
+- **More LLM providers** — the client abstraction is ready, just needs config wiring
+- **EPUB polish** — better image extraction, complex layout handling
+- **PDF reading order** — the heuristic works for single/double column but won't handle every layout
+- **Glossary UI** — a frontend page to manage term→translation mappings
+- **i18n** — the UI is currently Chinese-only; English localization would broaden the audience
+
+---
+
+## 📄 License
+
+MIT
