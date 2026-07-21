@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期"""
     init_db()
     yield
+    # 关闭时通知后台解析线程退出
+    books.signal_shutdown()
 
 
 app = FastAPI(

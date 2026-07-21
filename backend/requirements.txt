@@ -8,3 +8,8 @@ ebooklib>=0.18
 beautifulsoup4>=4.12
 lxml>=5.0
 PyMuPDF>=1.24.0
+rapidocr-onnxruntime>=1.3.0
+# onnxruntime 1.18+ 在部分 Windows 环境存在 DLL 加载问题
+onnxruntime>=1.15,<1.18
+numpy>=1.24.0,<2
+Pillow>=10.0.0
