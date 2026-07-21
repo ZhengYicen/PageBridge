@@ -14,10 +14,9 @@ node_modules/
 dist/
 .vite/
 
-# 存储
-storage/*.db
-storage/uploads/*
-storage/books/
+# 存储：保留目录，但不提交本地书籍和运行数据
+storage/*
+!storage/.gitkeep
 
 # IDE
 .vscode/
