@@ -1,0 +1,33 @@
+# Git
+.git
+
+# Environment
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Storage (user data, database, uploads)
+storage/
+
+# IDE
+.claude/
+.agents/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+mineru_models/

@@ -145,6 +145,23 @@ npm run dev
 
 Open http://localhost:5173
 
+### Docker (recommended)
+
+```bash
+cp .env.example .env
+# Edit .env — set your DEEPSEEK_API_KEY
+
+docker compose up --build
+```
+
+- **Frontend**: http://localhost:5173
+- **Backend health**: http://localhost:8000/health
+- **API docs**: http://localhost:8000/docs
+
+Stop with `docker compose down`. Data persists in `./storage/` on the host.
+
+---
+
 ### 4. Use it
 
 1. Drop a PDF or EPUB onto the upload area

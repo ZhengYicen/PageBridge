@@ -1,59 +1,33 @@
-version: "3.8"
-
 services:
-  # ── MinerU PDF 解析服务 ──────────────────────
-  mineru:
-    image: mineru:latest
-    container_name: ai-reader-mineru
-    shm_size: 32g
-    ipc: host
-    ports:
-      - "8001:8000"  # 映射到 8001 避免冲突
-    command:
-      - mineru-api
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-    environment:
-      - MINERU_MODEL_SOURCE=modelscope
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    profiles:
-      - mineru      # 默认不启动，需要时: docker compose --profile mineru up
-    restart: unless-stopped
-
   # ── 后端 ──────────────────────────────────────
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: ai-reader-backend
+    container_name: pagebridge-backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./storage:/app/storage
     env_file:
       - .env
-    environment:
-      - MINERU_URL=http://mineru:8000
-    depends_on:
-      - mineru
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   # ── 前端 ──────────────────────────────────────
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: ai-reader-frontend
+    container_name: pagebridge-frontend
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped

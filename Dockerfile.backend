@@ -2,17 +2,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装 RapidOCR / onnxruntime 所需的系统依赖
+# Install system dependencies for RapidOCR / onnxruntime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libgl1-mesa-glx \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python dependencies
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy backend source only
+COPY backend/ ./backend/
+COPY backend/prompts/ ./prompts/
+
+# Ensure storage directory exists
+RUN mkdir -p /app/storage
 
 EXPOSE 8000
 

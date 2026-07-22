@@ -35,8 +35,5 @@ LLM_CONFIG = {
     "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "2048")),
 }
 
-# MinerU 配置
-MINERU_URL = os.getenv("MINERU_URL", "http://localhost:8000")
-
 # 支持的格式
 SUPPORTED_FORMATS = {".pdf", ".epub"}
