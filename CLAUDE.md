@@ -86,5 +86,5 @@ metadata:
 - 抽样 20 个段落记录
 
 ## 后端注意
-- 后端运行在端口 8001（`start.ps1` 配置 8001，`vite.config.ts` proxy 到 8001）
-- 默认 backend 端口为 8000，注意区分
+- 后端运行在端口 8000（`start.ps1` 配置 8000，`vite.config.ts` proxy 到 8000）
+- MinerU 已弃用，不再需要

@@ -18,7 +18,7 @@ if (-not (Test-Path ".env")) {
 
 Write-Host "[1/3] Starting backend (port 8000)..."
 $venvPath = Join-Path $PSScriptRoot ".venv\Scripts\Activate.ps1"
-$backendCmd = "cd '$PSScriptRoot'; . '$venvPath'; uvicorn backend.main:app --reload --port 8001"
+$backendCmd = "cd '$PSScriptRoot'; . '$venvPath'; uvicorn backend.main:app --reload --port 8000"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd -WindowStyle Normal
 
 Start-Sleep -Seconds 4
