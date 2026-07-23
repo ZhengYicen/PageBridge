@@ -3,6 +3,7 @@ const API_BASE = "/api";
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     ...options,
   });
   if (!res.ok) {
@@ -12,12 +13,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface User {
+  id: string;
+  username: string;
+  role: string;
+  is_active: boolean;
+}
+
 export interface Book {
   id: string;
   title: string;
   author: string;
   format: string;
-  file_path: string;
   parse_status: string;
   total_chapters: number;
   total_pages: number;
@@ -27,6 +34,7 @@ export interface Book {
   error_message: string;
   created_at: string;
   uploaded_at?: string;
+  file_size?: number;
   chapters?: Chapter[];
 }
 
@@ -68,7 +76,8 @@ export interface Paragraph {
 
 export interface Job {
   id: string;
-  chapter_id: string;
+  chapter_id?: string;
+  book_id?: string;
   status: string;
   total_paragraphs: number;
   completed_paragraphs: number;
@@ -76,9 +85,9 @@ export interface Job {
   job_type: string;
   created_at: string;
   updated_at: string;
+  error_message?: string;
+  reserved_characters?: number;
 }
-
-// ── 阅读页类型 ──────────────────────────────────────
 
 export interface SourceFragment {
   pdf_page_index: number;
@@ -136,39 +145,80 @@ export interface PaginatedParagraphs {
   limit: number;
 }
 
+export interface TranslationEstimate {
+  characters: number;
+  daily_used: number;
+  daily_limit: number;
+  daily_remaining: number;
+  monthly_used: number;
+  monthly_limit: number;
+  monthly_remaining: number;
+  reserved_characters: number;
+  allowed: boolean;
+}
+
+export interface UploadLimits {
+  max_file_bytes: number;
+  max_storage_bytes: number;
+  used_storage_bytes: number;
+  max_pdf_pages: number;
+  max_epub_files: number;
+  max_epub_uncompressed_bytes: number;
+  max_epub_single_file_bytes: number;
+  max_epub_compression_ratio: number;
+}
+
 export const api = {
   // 上传
   upload: async (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+    const res = await fetch(`${API_BASE}/upload`, {
+      method: "POST",
+      body: form,
+      credentials: "include",
+    });
     if (!res.ok) throw new Error((await res.json()).detail);
     return res.json();
   },
 
+  // 限制
+  getLimits: () => request<UploadLimits>("/limits"),
+
   // 书籍
   listBooks: () => request<{ books: Book[] }>("/books"),
   getBook: (id: string) => request<Book>(`/books/${id}`),
-  parseBook: (id: string) => request<{ book_id: string; status: string; total_pages?: number }>(
-    `/books/${id}/parse`,
-    { method: "POST" }
-  ),
+  parseBook: (id: string) =>
+    request<{ book_id: string; job_id?: string; status: string }>(`/books/${id}/parse`, { method: "POST" }),
   getBookProgress: (id: string) => request<BookProgress>(`/books/${id}/progress`),
+  deleteBook: (id: string) => request<{ status: string }>(`/books/${id}`, { method: "DELETE" }),
 
   // 章节
   getParagraphs: (id: string) =>
     request<{ chapter: Chapter; paragraphs: Paragraph[] }>(`/chapters/${id}/paragraphs`),
-  translateChapter: (id: string) =>
-    request<{ job_id: string; chapter_id: string; status: string }>(`/chapters/${id}/translate`, { method: "POST" }),
+  getTranslationEstimate: (chapterId: string) =>
+    request<TranslationEstimate>(`/chapters/${chapterId}/translation-estimate`),
+  translateChapter: (chapterId: string, confirmed: boolean) =>
+    request<{ job_id: string; chapter_id: string; status: string }>(
+      `/chapters/${chapterId}/translate`,
+      { method: "POST", body: JSON.stringify({ confirmed }) }
+    ),
+
+  // 翻译用量
+  getTranslationUsage: () =>
+    request<{
+      daily_used: number;
+      daily_limit: number;
+      monthly_used: number;
+      monthly_limit: number;
+      reserved_characters: number;
+    }>("/translation/usage"),
 
   // 任务
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   pauseJob: (id: string) => request<{ status: string }>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: string) => request<{ status: string }>(`/jobs/${id}/resume`, { method: "POST" }),
   retryJob: (id: string) => request<{ status: string }>(`/jobs/${id}/retry`, { method: "POST" }),
-
-  // 书籍管理
-  deleteBook: (id: string) => request<{ status: string }>(`/books/${id}`, { method: "DELETE" }),
 
   // 翻译状态轮询
   getParagraphTranslations: (chapterId: string) =>
@@ -180,12 +230,6 @@ export const api = {
       completed: number;
       paragraphs: Paragraph[];
     }>(`/paragraphs/${chapterId}/translations`),
-
-  // 预翻译
-  preTranslateChapter: (chapterId: string) =>
-    request<{ job_id?: string; chapter_id: string; status: string; message?: string; pending?: number }>(
-      `/chapters/${chapterId}/pre-translate`, { method: "POST" }
-    ),
 
   subscribeProgress: (jobId: string, onMessage: (data: any) => void) => {
     const es = new EventSource(`${API_BASE}/jobs/${jobId}/progress`);
@@ -200,13 +244,10 @@ export const api = {
     return () => es.close();
   },
 
-  // ── 阅读页 ──────────────────────────────────────────
-
-  /** 获取阅读页初始化信息 */
+  // ── 阅读页 ──
   getReaderInfo: (bookId: string) =>
     request<ReaderInfo>(`/books/${bookId}/read`),
 
-  /** 获取某个 section 的段落（分页，含 source_fragments） */
   getSectionParagraphs: (
     bookId: string,
     sectionId: string,
@@ -215,5 +256,33 @@ export const api = {
   ) =>
     request<PaginatedParagraphs>(
       `/books/${bookId}/sections/${sectionId}/paragraphs?offset=${offset}&limit=${limit}`,
+    ),
+
+  // ── 管理员 ──
+  listUsers: () =>
+    request<{
+      users: Array<{
+        id: string;
+        username: string;
+        role: string;
+        is_active: number;
+        created_at: string;
+        storage_bytes: number;
+        book_count: number;
+        daily_translation_chars: number;
+        monthly_translation_chars: number;
+      }>;
+    }>("/auth/users"),
+
+  createInvite: (expiresInDays: number) =>
+    request<{ invite_code: string; expires_in_days: number }>(
+      "/auth/invites",
+      { method: "POST", body: JSON.stringify({ expires_in_days: expiresInDays }) }
+    ),
+
+  updateUser: (userId: string, data: { is_active?: boolean }) =>
+    request<{ status: string }>(
+      `/auth/users/${userId}`,
+      { method: "PATCH", body: JSON.stringify(data) }
     ),
 };

@@ -1,13 +1,16 @@
 """SQLite 数据库初始化，支持后续迁移到 PostgreSQL（预留 async 接口）"""
 
+import logging
 import sqlite3
 import os
 import hashlib
 from pathlib import Path
 
+logger = logging.getLogger("pagebridge.db")
+
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "app.db"
 
-# 建表 SQL
+# 建表 SQL — 所有 CREATE TABLE / INDEX 在此统一
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,
@@ -24,6 +27,40 @@ CREATE TABLE IF NOT EXISTS books (
     error_message TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    used_by TEXT REFERENCES users(id),
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS translation_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    job_id TEXT NOT NULL,
+    characters INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS book_pages (
@@ -69,8 +106,8 @@ CREATE TABLE IF NOT EXISTS paragraphs (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
-    chapter_id TEXT NOT NULL REFERENCES chapters(id),
-    status TEXT NOT NULL DEFAULT 'running',
+    chapter_id TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
     total_paragraphs INTEGER DEFAULT 0,
     completed_paragraphs INTEGER DEFAULT 0,
     failed_paragraphs INTEGER DEFAULT 0,
@@ -101,16 +138,6 @@ CREATE TABLE IF NOT EXISTS translations (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 索引
-CREATE INDEX IF NOT EXISTS idx_chapters_book_id ON chapters(book_id);
-CREATE INDEX IF NOT EXISTS idx_paragraphs_chapter_id ON paragraphs(chapter_id);
-CREATE INDEX IF NOT EXISTS idx_paragraphs_status ON paragraphs(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_chapter_id ON jobs(chapter_id);
-CREATE INDEX IF NOT EXISTS idx_glossary_book_id ON glossary(book_id);
-CREATE INDEX IF NOT EXISTS idx_translations_source_hash ON translations(source_hash);
-CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragraph_id);
-CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
-
 CREATE TABLE IF NOT EXISTS paragraph_source_fragments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     paragraph_id TEXT NOT NULL REFERENCES paragraphs(id),
@@ -129,8 +156,21 @@ CREATE TABLE IF NOT EXISTS paragraph_source_fragments (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_chapters_book_id ON chapters(book_id);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_chapter_id ON paragraphs(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_status ON paragraphs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_chapter_id ON jobs(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type);
+CREATE INDEX IF NOT EXISTS idx_glossary_book_id ON glossary(book_id);
+CREATE INDEX IF NOT EXISTS idx_translations_source_hash ON translations(source_hash);
+CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragraph_id);
+CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_para ON paragraph_source_fragments(paragraph_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_page ON paragraph_source_fragments(pdf_page_index);
+CREATE INDEX IF NOT EXISTS idx_usage_user_created ON translation_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_invites_code_hash ON invites(code_hash);
 """
 
 
@@ -145,44 +185,103 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """初始化数据库表，兼容旧库添加新字段"""
+    """初始化数据库表，兼容旧库添加新字段。可重复执行，不破坏已有数据。"""
     conn = get_connection()
-    conn.executescript(CREATE_TABLES_SQL)
-    # 兼容旧库：添加 uploaded_at 列
-    _add_column_if_missing(conn, "books", "uploaded_at", "TEXT")
-    # 兼容旧库：添加逐页解析相关列
-    _add_column_if_missing(conn, "books", "total_pages", "INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "books", "parsed_pages", "INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "books", "failed_pages", "INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "books", "current_stage", "TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "books", "error_message", "TEXT DEFAULT ''")
-    # 兼容旧库：添加 paragraph 来源相关列
-    _add_column_if_missing(conn, "paragraphs", "page_end", "INTEGER")
-    _add_column_if_missing(conn, "paragraphs", "page_start", "INTEGER")
-    # 兼容旧库：添加 book_pages 索引相关列
-    _add_column_if_missing(conn, "book_pages", "page_index", "INTEGER")
-    _add_column_if_missing(conn, "book_pages", "rotation", "INTEGER")
-    conn.commit()
-    # 清理上次非正常退出留下的解析状态
-    _cleanup_stale_parse_state(conn)
-    conn.close()
+    try:
+        conn.executescript(CREATE_TABLES_SQL)
+
+        # ── 兼容旧库：渐进式加列 ─────────────────────────
+        _add_column_if_missing(conn, "books", "owner_id", "TEXT")
+        _add_column_if_missing(conn, "books", "file_size", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "books", "total_pages", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "books", "parsed_pages", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "books", "failed_pages", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "books", "current_stage", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "books", "error_message", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "paragraphs", "page_end", "INTEGER")
+        _add_column_if_missing(conn, "paragraphs", "page_start", "INTEGER")
+        _add_column_if_missing(conn, "book_pages", "page_index", "INTEGER")
+        _add_column_if_missing(conn, "book_pages", "rotation", "INTEGER")
+        _add_column_if_missing(conn, "jobs", "book_id", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "jobs", "owner_id", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "jobs", "reserved_characters", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "jobs", "error_message", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "jobs", "started_at", "TEXT")
+
+        # ── 迁移：为旧书籍设置 owner_id ──────────────────
+        _migrate_old_books_owner(conn)
+
+        # ── 启动时恢复中断的任务 ────────────────────────
+        _cleanup_stale_parse_state(conn)
+        _cleanup_stale_jobs(conn)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("数据库初始化失败")
+        raise
+    finally:
+        conn.close()
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_type: str):
-    """兼容旧库：如果列不存在则添加"""
+    """兼容旧库：如果列不存在则添加。失败时记录日志但不中断。"""
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except Exception:
-        pass
+    except sqlite3.OperationalError as e:
+        # SQLite 错误代码 1 表示"重复列名"——这是正常情况
+        if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+            pass
+        else:
+            logger.warning("ALTER TABLE %s ADD %s: %s", table, column, e)
+
+
+def _migrate_old_books_owner(conn: sqlite3.Connection):
+    """将 owner_id 为空的旧书籍归属给 bootstrap 管理员（如果存在）。"""
+    null_count = conn.execute(
+        "SELECT COUNT(*) FROM books WHERE owner_id IS NULL"
+    ).fetchone()[0]
+    if null_count == 0:
+        return
+
+    # 找第一个管理员
+    admin = conn.execute(
+        "SELECT id FROM users WHERE role='admin' ORDER BY created_at LIMIT 1"
+    ).fetchone()
+    if admin:
+        conn.execute(
+            "UPDATE books SET owner_id=? WHERE owner_id IS NULL",
+            (admin["id"],)
+        )
+        logger.info("已迁移 %d 本旧书籍归属到管理员 %s", null_count, admin["id"])
+    else:
+        logger.warning(
+            "发现 %d 本旧书籍没有 owner_id，但尚未创建管理员账号。"
+            "引导管理员账号初始化后这些书籍将无法访问，"
+            "请在 bootstrap 后手动迁移。", null_count
+        )
 
 
 def _cleanup_stale_parse_state(conn: sqlite3.Connection):
     """启动时将残留的 parsing / assembling 状态统一改为 failed"""
-    conn.execute(
+    result = conn.execute(
         "UPDATE books SET parse_status='failed', current_stage='' "
         "WHERE parse_status IN ('parsing', 'assembling')"
     )
     conn.commit()
+    if result.rowcount:
+        logger.info("恢复了 %d 个中断的解析状态", result.rowcount)
+
+
+def _cleanup_stale_jobs(conn: sqlite3.Connection):
+    """服务重启后，将遗留的 running 状态任务恢复为 queued 或标记中断。"""
+    result = conn.execute(
+        "UPDATE jobs SET status='queued', error_message='recovered after restart', started_at=NULL "
+        "WHERE status IN ('running', 'pausing')"
+    )
+    conn.commit()
+    if result.rowcount:
+        logger.info("恢复了 %d 个中断的任务", result.rowcount)
 
 
 def source_hash(text: str) -> str:

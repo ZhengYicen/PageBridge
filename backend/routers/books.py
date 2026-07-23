@@ -3,23 +3,26 @@
 import gc
 import json
 import logging
+import shutil
 import threading
 import uuid
 from pathlib import Path
 
 import fitz
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
+from backend.auth import current_user, require_book_owner
+from backend.config import STORAGE_DIR
 from backend.database import get_connection, row_to_dict, rows_to_list
 from backend.parsers import get_parser
-from backend.config import STORAGE_DIR
+from backend.worker import job_manager
 
-logger = logging.getLogger("ai-reader.parse")
+logger = logging.getLogger("pagebridge.books")
 
 router = APIRouter(prefix="/api", tags=["books"])
 
-# ── 全局 shutdown 事件 ────────────────────────────────
+# ── 全局 shutdown 事件（给后台解析线程使用） ──────────
 _shutdown_event = threading.Event()
 
 
@@ -29,52 +32,77 @@ def signal_shutdown():
 
 
 # ═══════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════
+
+
+def _book_to_safe_dict(book: dict) -> dict:
+    """返回不包含敏感路径信息的书籍字典。"""
+    safe_keys = [
+        "id", "title", "author", "format", "parse_status",
+        "total_chapters", "total_pages", "parsed_pages", "failed_pages",
+        "current_stage", "error_message", "created_at", "uploaded_at",
+        "owner_id", "file_size",
+    ]
+    return {k: book.get(k) for k in safe_keys if k in book}
+
+
+# ═══════════════════════════════════════════════════════════
 # 书籍 CRUD
 # ═══════════════════════════════════════════════════════════
 
 
 @router.get("/books")
-async def list_books():
-    """获取所有书籍，按上传时间倒序"""
+async def list_books(user: dict = Depends(current_user)):
+    """获取当前用户的所有书籍，按上传时间倒序。"""
     conn = get_connection()
-    rows = rows_to_list(conn.execute(
-        "SELECT * FROM books ORDER BY uploaded_at DESC"
-    ).fetchall())
-    conn.close()
-    return {"books": rows}
+    try:
+        rows = rows_to_list(conn.execute(
+            "SELECT * FROM books WHERE owner_id=? ORDER BY uploaded_at DESC",
+            (user["id"],),
+        ).fetchall())
+    finally:
+        conn.close()
+    return {"books": [_book_to_safe_dict(r) for r in rows]}
 
 
 @router.get("/books/{book_id}")
-async def get_book(book_id: str):
-    """获取书籍详情（含章节列表）"""
+async def get_book(book_id: str, user: dict = Depends(current_user)):
+    """获取书籍详情（含章节列表）。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT * FROM books WHERE id=?", (book_id,)
-    ).fetchone())
-    if not book:
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT * FROM books WHERE id=?", (book_id,)
+        ).fetchone())
+        if not book:
+            raise HTTPException(404, "书籍不存在")
+
+        chapters = rows_to_list(conn.execute(
+            "SELECT * FROM chapters WHERE book_id=? ORDER BY chapter_order",
+            (book_id,),
+        ).fetchall())
+    finally:
         conn.close()
-        raise HTTPException(404, "书籍不存在")
 
-    chapters = rows_to_list(conn.execute(
-        "SELECT * FROM chapters WHERE book_id=? ORDER BY chapter_order",
-        (book_id,),
-    ).fetchall())
-    conn.close()
-
-    book["chapters"] = chapters
-    return book
+    result = _book_to_safe_dict(book)
+    result["chapters"] = chapters
+    return result
 
 
 @router.get("/books/{book_id}/progress")
-async def get_book_progress(book_id: str):
-    """获取书籍解析进度"""
+async def get_book_progress(book_id: str, user: dict = Depends(current_user)):
+    """获取书籍解析进度。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT parse_status, current_stage, total_pages, parsed_pages, "
-        "failed_pages, error_message FROM books WHERE id=?",
-        (book_id,),
-    ).fetchone())
-    conn.close()
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT parse_status, current_stage, total_pages, parsed_pages, "
+            "failed_pages, error_message FROM books WHERE id=?",
+            (book_id,),
+        ).fetchone())
+    finally:
+        conn.close()
 
     if not book:
         raise HTTPException(404, "书籍不存在")
@@ -96,91 +124,120 @@ async def get_book_progress(book_id: str):
 
 
 @router.post("/books/{book_id}/parse")
-async def parse_book(book_id: str):
-    """解析书籍：后台线程逐页解析 + 最后统一组装"""
+async def parse_book(book_id: str, user: dict = Depends(current_user)):
+    """解析书籍：创建 queued parse job，由后台 worker 执行。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT * FROM books WHERE id=?", (book_id,)
-    ).fetchone())
-    conn.close()
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT * FROM books WHERE id=?", (book_id,)
+        ).fetchone())
+    finally:
+        conn.close()
 
     if not book:
         raise HTTPException(404, "书籍不存在")
 
+    # 检查文件是否存在
     file_path = book["file_path"]
     if not Path(file_path).exists():
         raise HTTPException(400, "原文件不存在")
 
-    # 检查是否已在解析中
-    if book["parse_status"] in ("parsing", "assembling"):
-        raise HTTPException(409, "书籍正在解析中，请等待完成")
-
-    # ── 清理上一次解析的残留数据 ──────────────────
-    _clean_book_parse_data(book_id)
-
-    # ── 初始化书籍状态 ────────────────────────────
-    book_id_str = book_id
-    conn = get_connection()
-
-    # 获取总页数
-    pdf_doc = fitz.open(file_path)
-    total_pages = len(pdf_doc)
-    pdf_doc.close()
-
-    conn.execute(
-        "UPDATE books SET parse_status='parsing', current_stage='parsing', "
-        "total_pages=?, parsed_pages=0, failed_pages=0, "
-        "error_message='', total_chapters=0 WHERE id=?",
-        (total_pages, book_id_str),
-    )
-    conn.commit()
-    conn.close()
-
-    logger.info("📖 开始后台解析: %s (%d 页)", Path(file_path).name, total_pages)
-
-    # ── 启动后台线程 ──────────────────────────────
-    thread = threading.Thread(
-        target=_parse_book_background,
-        args=(book_id_str, file_path, total_pages, _shutdown_event),
-        name=f"parse-{book_id_str[:8]}",
-        daemon=True,
-    )
-    thread.start()
-
-    return {"book_id": book_id_str, "status": "started", "total_pages": total_pages}
+    # 创建 parse job（校验在 job_manager.start_parse 中）
+    try:
+        job_id = await job_manager.start_parse(book_id, file_path, owner_id=user["id"])
+        return {"book_id": book_id, "job_id": job_id, "status": "queued"}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.delete("/books/{book_id}")
-async def delete_book(book_id: str):
-    """删除书籍及其所有关联数据"""
+async def delete_book(book_id: str, user: dict = Depends(current_user)):
+    """删除书籍及其所有关联数据（事务化，文件删除失败日志记录）。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT * FROM books WHERE id=?", (book_id,)
-    ).fetchone())
-    if not book:
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT * FROM books WHERE id=?", (book_id,)
+        ).fetchone())
+        if not book:
+            raise HTTPException(404, "书籍不存在")
+
+        # 收集需要删除的章节 ID
+        old_chapters = rows_to_list(conn.execute(
+            "SELECT id FROM chapters WHERE book_id=?", (book_id,)
+        ).fetchall())
+        old_chapter_ids = [c["id"] for c in old_chapters]
+
+        if old_chapter_ids:
+            placeholders = ",".join("?" * len(old_chapter_ids))
+            # 删除段落关联数据
+            para_ids = conn.execute(
+                f"SELECT id FROM paragraphs WHERE chapter_id IN ({placeholders})",
+                old_chapter_ids,
+            ).fetchall()
+            if para_ids:
+                pid_placeholders = ",".join("?" * len(para_ids))
+                pids = [r["id"] for r in para_ids]
+                conn.execute(
+                    f"DELETE FROM paragraph_source_fragments WHERE paragraph_id IN ({pid_placeholders})", pids
+                )
+                conn.execute(
+                    f"DELETE FROM translations WHERE paragraph_id IN ({pid_placeholders})", pids
+                )
+            conn.execute(
+                f"DELETE FROM paragraphs WHERE chapter_id IN ({placeholders})", old_chapter_ids
+            )
+
+        # 删除 jobs、chapters、book_pages、glossary
+        conn.execute("DELETE FROM jobs WHERE book_id=? OR book_id=''", (book_id,))
+        if old_chapter_ids:
+            placeholders = ",".join("?" * len(old_chapter_ids))
+            conn.execute(f"DELETE FROM jobs WHERE chapter_id IN ({placeholders})", old_chapter_ids)
+            conn.execute(f"DELETE FROM chapters WHERE id IN ({placeholders})", old_chapter_ids)
+        conn.execute("DELETE FROM book_pages WHERE book_id=?", (book_id,))
+        conn.execute("DELETE FROM glossary WHERE book_id=?", (book_id,))
+
+        # 最后删除书籍记录
+        conn.execute("DELETE FROM books WHERE id=?", (book_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(404, "书籍不存在")
 
-    _clean_book_parse_data(book_id)
+    # ── 删除物理文件（失败只记录不阻止） ──────────
+    file_errors = []
 
-    # 删除书籍记录
-    conn.execute("DELETE FROM books WHERE id=?", (book_id,))
-    conn.commit()
-    conn.close()
+    try:
+        Path(book["file_path"]).unlink(missing_ok=True)
+    except Exception as e:
+        file_errors.append(f"原文件: {e}")
 
-    # 清理图片资源
-    import shutil
     asset_dir = STORAGE_DIR / "books" / book_id
     if asset_dir.exists():
-        shutil.rmtree(asset_dir)
+        try:
+            shutil.rmtree(asset_dir)
+        except Exception as e:
+            file_errors.append(f"资源目录: {e}")
+
+    if file_errors:
+        logger.warning("删除书籍 %s 后文件清理不完整: %s", book_id, "; ".join(file_errors))
 
     logger.info("已删除书籍: %s (%s)", book["title"], book_id)
     return {"status": "deleted"}
 
 
 @router.get("/books/{book_id}/assets/{asset_path:path}")
-async def serve_book_asset(book_id: str, asset_path: str):
+async def serve_book_asset(book_id: str, asset_path: str, user: dict = Depends(current_user)):
     """提供书籍的静态资源（图片等）。带路径穿越防护。"""
+    conn = get_connection()
+    try:
+        require_book_owner(conn, book_id, user)
+    finally:
+        conn.close()
+
     base_dir = (STORAGE_DIR / "books" / book_id / "assets").resolve()
     requested = (base_dir / asset_path).resolve()
 
@@ -193,13 +250,16 @@ async def serve_book_asset(book_id: str, asset_path: str):
 
 
 @router.get("/books/{book_id}/pdf")
-async def serve_book_pdf(book_id: str):
-    """提供原始 PDF 文件流（用于 PDF.js 加载）"""
+async def serve_book_pdf(book_id: str, user: dict = Depends(current_user)):
+    """提供原始 PDF 文件流（用于 PDF.js 加载）。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT file_path FROM books WHERE id=?", (book_id,)
-    ).fetchone())
-    conn.close()
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT file_path FROM books WHERE id=?", (book_id,)
+        ).fetchone())
+    finally:
+        conn.close()
 
     if not book:
         raise HTTPException(404, "书籍不存在")
@@ -212,70 +272,69 @@ async def serve_book_pdf(book_id: str):
 
 
 @router.get("/books/{book_id}/read")
-async def get_reader_info(book_id: str):
-    """获取阅读页初始化信息（书籍元数据 + 章节/全文列表）"""
+async def get_reader_info(book_id: str, user: dict = Depends(current_user)):
+    """获取阅读页初始化信息（书籍元数据 + 章节/全文列表）。"""
     conn = get_connection()
-    book = row_to_dict(conn.execute(
-        "SELECT id, title, format, total_pages, parse_status FROM books WHERE id=?",
-        (book_id,),
-    ).fetchone())
-    if not book:
-        conn.close()
-        raise HTTPException(404, "书籍不存在")
+    try:
+        require_book_owner(conn, book_id, user)
+        book = row_to_dict(conn.execute(
+            "SELECT id, title, format, total_pages, parse_status FROM books WHERE id=?",
+            (book_id,),
+        ).fetchone())
+        if not book:
+            raise HTTPException(404, "书籍不存在")
 
-    # 获取所有章节（作为 sections）
-    chapters = conn.execute(
-        "SELECT id, title, chapter_order, paragraph_count FROM chapters "
-        "WHERE book_id=? ORDER BY chapter_order",
-        (book_id,),
-    ).fetchall()
+        # 获取所有章节（作为 sections）
+        chapters = conn.execute(
+            "SELECT id, title, chapter_order, paragraph_count FROM chapters "
+            "WHERE book_id=? ORDER BY chapter_order",
+            (book_id,),
+        ).fetchall()
 
-    sections = []
-    cumulative_offset = 0
-    for ch in chapters:
-        ch_dict = dict(ch)
-        # 获取该 section 的 page_start 和 page_end
-        p_start = conn.execute(
-            "SELECT MIN(page_number) as ps FROM paragraphs WHERE chapter_id=?",
-            (ch_dict["id"],),
+        sections = []
+        cumulative_offset = 0
+        for ch in chapters:
+            ch_dict = dict(ch)
+            p_start = conn.execute(
+                "SELECT MIN(page_number) as ps FROM paragraphs WHERE chapter_id=?",
+                (ch_dict["id"],),
+            ).fetchone()["ps"]
+            p_end = conn.execute(
+                "SELECT MAX(page_end) as pe FROM paragraphs WHERE chapter_id=?",
+                (ch_dict["id"],),
+            ).fetchone()["pe"]
+            sections.append({
+                "section_id": ch_dict["id"],
+                "title": ch_dict["title"],
+                "paragraph_count": ch_dict["paragraph_count"] or 0,
+                "start_paragraph_order": cumulative_offset,
+                "page_start": p_start or 0,
+                "page_end": p_end or 0,
+            })
+            cumulative_offset += ch_dict["paragraph_count"] or 0
+
+        # 虚拟 "全文" section
+        full_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM paragraphs p "
+            "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+            (book_id,),
+        ).fetchone()["cnt"]
+        full_page_start = conn.execute(
+            "SELECT MIN(page_number) as ps FROM paragraphs p "
+            "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+            (book_id,),
         ).fetchone()["ps"]
-        p_end = conn.execute(
-            "SELECT MAX(page_end) as pe FROM paragraphs WHERE chapter_id=?",
-            (ch_dict["id"],),
+        full_page_end = conn.execute(
+            "SELECT MAX(page_end) as pe FROM paragraphs p "
+            "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
+            (book_id,),
         ).fetchone()["pe"]
-        sections.append({
-            "section_id": ch_dict["id"],
-            "title": ch_dict["title"],
-            "paragraph_count": ch_dict["paragraph_count"] or 0,
-            "start_paragraph_order": cumulative_offset,
-            "page_start": p_start or 0,
-            "page_end": p_end or 0,
-        })
-        cumulative_offset += ch_dict["paragraph_count"] or 0
-
-    # 添加虚拟 "全文" section（包含所有段落）
-    full_count = conn.execute(
-        "SELECT COUNT(*) as cnt FROM paragraphs p "
-        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
-        (book_id,),
-    ).fetchone()["cnt"]
-    full_page_start = conn.execute(
-        "SELECT MIN(page_number) as ps FROM paragraphs p "
-        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
-        (book_id,),
-    ).fetchone()["ps"]
-    full_page_end = conn.execute(
-        "SELECT MAX(page_end) as pe FROM paragraphs p "
-        "JOIN chapters c ON p.chapter_id=c.id WHERE c.book_id=?",
-        (book_id,),
-    ).fetchone()["pe"]
-
-    conn.close()
+    finally:
+        conn.close()
 
     pdf_url = f"/api/books/{book_id}/pdf"
     total_pages = book["total_pages"] or 0
 
-    # 虚拟 section 放在第一个（默认加载）
     virtual_section = {
         "section_id": "__full__",
         "title": "全文",
@@ -299,50 +358,51 @@ async def get_reader_info(book_id: str):
 
 
 # ═══════════════════════════════════════════════════════════
-# 内部函数
+# 内部解析函数（被 worker 调用）
 # ═══════════════════════════════════════════════════════════
 
 
 def _clean_book_parse_data(book_id: str):
     """删除书本的上一次解析残留数据。"""
     conn = get_connection()
-
-    # 删除旧段落 → 旧章节 → 旧页面
-    old_chapters = conn.execute(
-        "SELECT id FROM chapters WHERE book_id=?", (book_id,)
-    ).fetchall()
-    old_chapter_ids = [r["id"] for r in old_chapters]
-
-    if old_chapter_ids:
-        placeholders = ",".join("?" * len(old_chapter_ids))
-        para_ids = conn.execute(
-            f"SELECT id FROM paragraphs WHERE chapter_id IN ({placeholders})",
-            old_chapter_ids,
+    try:
+        old_chapters = conn.execute(
+            "SELECT id FROM chapters WHERE book_id=?", (book_id,)
         ).fetchall()
-        if para_ids:
-            pid_placeholders = ",".join("?" * len(para_ids))
-            pids = [r["id"] for r in para_ids]
-            # 删除关联的 source_fragments
-            conn.execute(
-                f"DELETE FROM paragraph_source_fragments WHERE paragraph_id IN ({pid_placeholders})", pids
-            )
-            conn.execute(
-                f"DELETE FROM translations WHERE paragraph_id IN ({pid_placeholders})", pids
-            )
-        conn.execute(
-            f"DELETE FROM paragraphs WHERE chapter_id IN ({placeholders})", old_chapter_ids
-        )
-        conn.execute(
-            f"DELETE FROM jobs WHERE chapter_id IN ({placeholders})", old_chapter_ids
-        )
-        conn.execute(
-            f"DELETE FROM chapters WHERE id IN ({placeholders})", old_chapter_ids
-        )
+        old_chapter_ids = [r["id"] for r in old_chapters]
 
-    # 删除旧页面记录
-    conn.execute("DELETE FROM book_pages WHERE book_id=?", (book_id,))
-    conn.commit()
-    conn.close()
+        if old_chapter_ids:
+            placeholders = ",".join("?" * len(old_chapter_ids))
+            para_ids = conn.execute(
+                f"SELECT id FROM paragraphs WHERE chapter_id IN ({placeholders})",
+                old_chapter_ids,
+            ).fetchall()
+            if para_ids:
+                pid_placeholders = ",".join("?" * len(para_ids))
+                pids = [r["id"] for r in para_ids]
+                conn.execute(
+                    f"DELETE FROM paragraph_source_fragments WHERE paragraph_id IN ({pid_placeholders})", pids
+                )
+                conn.execute(
+                    f"DELETE FROM translations WHERE paragraph_id IN ({pid_placeholders})", pids
+                )
+            conn.execute(
+                f"DELETE FROM paragraphs WHERE chapter_id IN ({placeholders})", old_chapter_ids
+            )
+            conn.execute(
+                f"DELETE FROM jobs WHERE chapter_id IN ({placeholders})", old_chapter_ids
+            )
+            conn.execute(
+                f"DELETE FROM chapters WHERE id IN ({placeholders})", old_chapter_ids
+            )
+
+        conn.execute("DELETE FROM book_pages WHERE book_id=?", (book_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _parse_book_background(
@@ -379,18 +439,14 @@ def _parse_book_background(
             page_number = page_idx + 1
 
             if page_number % 20 == 1 or page_number == total_pages:
-                logger.info(
-                    "[PDF] 正在处理第 %d/%d 页", page_number, total_pages
-                )
+                logger.info("[PDF] 正在处理第 %d/%d 页", page_number, total_pages)
 
             # ── 解析单页 ────────────────────────────
             try:
                 page = doc[page_idx]
                 result = parser.parse_single_page(page, page_number, doc=doc)
             except Exception as exc:
-                logger.error(
-                    "[PDF] 第 %d/%d 页异常: %s", page_number, total_pages, exc
-                )
+                logger.error("[PDF] 第 %d/%d 页异常: %s", page_number, total_pages, exc)
                 result = {
                     "page_number": page_number,
                     "width": page.rect.width * 200 / 72 if 'page' in dir() else 0,
@@ -431,14 +487,12 @@ def _parse_book_background(
         _set_stage(book_id, "assembling")
         logger.info("[PDF] 开始组装: %s (%d 页)", book_id, total_pages)
 
-        # 从 book_pages 读取所有 completed 页面
         all_page_data = _load_page_results(book_id)
 
         if not all_page_data:
             _fail_book(book_id, "没有可用页面数据")
             return
 
-        # 调用解析器组装
         chapters_data = parser.assemble(all_page_data)
 
         if not chapters_data:
@@ -449,75 +503,78 @@ def _parse_book_background(
 
         # ── 写入 chapters 和 paragraphs ────────────
         conn = get_connection()
-        chapter_count = 0
-        paragraph_count = 0
+        try:
+            chapter_count = 0
+            paragraph_count = 0
 
-        for ch in chapters_data:
-            chapter_id = str(uuid.uuid4())
-            title = ch["title"]
-            paragraphs = ch.get("paragraphs", [])
+            for ch in chapters_data:
+                chapter_id = str(uuid.uuid4())
+                title = ch["title"]
+                paragraphs = ch.get("paragraphs", [])
 
-            conn.execute(
-                "INSERT INTO chapters (id, book_id, title, chapter_order, paragraph_count) "
-                "VALUES (?,?,?,?,?)",
-                (chapter_id, book_id, title, ch["chapter_order"], len(paragraphs)),
-            )
-
-            for para in paragraphs:
-                para_id = str(uuid.uuid4())
                 conn.execute(
-                    "INSERT INTO paragraphs "
-                    "(id, chapter_id, paragraph_order, source_text, source_html, "
-                    "page_number, page_start, page_end, source_bbox, status) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        para_id, chapter_id,
-                        para.get("paragraph_order", 0),
-                        para.get("text", ""),
-                        para.get("html", ""),
-                        para.get("page_number", 0),
-                        para.get("page_number", 0),
-                        para.get("page_end", para.get("page_number", 0)),
-                        "",  # source_bbox kept for compatibility
-                        "pending",
-                    ),
+                    "INSERT INTO chapters (id, book_id, title, chapter_order, paragraph_count) "
+                    "VALUES (?,?,?,?,?)",
+                    (chapter_id, book_id, title, ch["chapter_order"], len(paragraphs)),
                 )
 
-                # 保存 source_fragments
-                fragments = para.get("source_fragments", [])
-                for frag in fragments:
+                for para in paragraphs:
+                    para_id = str(uuid.uuid4())
                     conn.execute(
-                        "INSERT INTO paragraph_source_fragments "
-                        "(paragraph_id, pdf_page_index, pdf_page_number, bbox, bbox_normalized, "
-                        "original_page_width, original_page_height, fragment_order, source_text, "
-                        "confidence, parse_method) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO paragraphs "
+                        "(id, chapter_id, paragraph_order, source_text, source_html, "
+                        "page_number, page_start, page_end, source_bbox, status) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
-                            para_id,
-                            frag.get("pdf_page_index", 0),
-                            frag.get("pdf_page_number", 0),
-                            frag.get("bbox", "{}"),
-                            frag.get("bbox_normalized", "{}"),
-                            frag.get("original_page_width", 0),
-                            frag.get("original_page_height", 0),
-                            frag.get("fragment_order", 0),
-                            frag.get("source_text", ""),
-                            frag.get("confidence", 0.0),
-                            frag.get("parse_method", ""),
+                            para_id, chapter_id,
+                            para.get("paragraph_order", 0),
+                            para.get("text", ""),
+                            para.get("html", ""),
+                            para.get("page_number", 0),
+                            para.get("page_number", 0),
+                            para.get("page_end", para.get("page_number", 0)),
+                            "",
+                            "pending",
                         ),
                     )
 
-                paragraph_count += 1
-            chapter_count += 1
+                    fragments = para.get("source_fragments", [])
+                    for frag in fragments:
+                        conn.execute(
+                            "INSERT INTO paragraph_source_fragments "
+                            "(paragraph_id, pdf_page_index, pdf_page_number, bbox, bbox_normalized, "
+                            "original_page_width, original_page_height, fragment_order, source_text, "
+                            "confidence, parse_method) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                para_id,
+                                frag.get("pdf_page_index", 0),
+                                frag.get("pdf_page_number", 0),
+                                frag.get("bbox", "{}"),
+                                frag.get("bbox_normalized", "{}"),
+                                frag.get("original_page_width", 0),
+                                frag.get("original_page_height", 0),
+                                frag.get("fragment_order", 0),
+                                frag.get("source_text", ""),
+                                frag.get("confidence", 0.0),
+                                frag.get("parse_method", ""),
+                            ),
+                        )
 
-        # 标记完成
-        conn.execute(
-            "UPDATE books SET parse_status='completed', current_stage='completed', "
-            "total_chapters=?, error_message='' WHERE id=?",
-            (chapter_count, book_id),
-        )
-        conn.commit()
-        conn.close()
+                    paragraph_count += 1
+                chapter_count += 1
+
+            conn.execute(
+                "UPDATE books SET parse_status='completed', current_stage='completed', "
+                "total_chapters=?, error_message='' WHERE id=?",
+                (chapter_count, book_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
         logger.info(
             "[PDF] 解析完成: %s — %d 章, %d 段, %d/%d 页失败",
@@ -563,6 +620,9 @@ def _upsert_page_result(book_id: str, result: dict):
             ),
         )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -621,7 +681,6 @@ def _load_page_results(book_id: str) -> list[dict]:
         results = []
         for row in rows:
             r = dict(row)
-            # 还原 lines_json
             try:
                 lines = json.loads(r.get("lines_json", "[]"))
             except json.JSONDecodeError:

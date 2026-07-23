@@ -40,7 +40,7 @@ export default function ReaderPage() {
   const currentPdfPageRef = useRef(1);
   const scrollToOffsetRef = useRef<number>(-1);
 
-  // ── 预翻译 ──────────────────────────────────────────
+  // ── 翻译轮询状态 ──────────────────────────────
   const [translating, setTranslating] = useState(false);
 
   // ── 加载阅读页 ──────────────────────────────────────
@@ -81,7 +81,7 @@ export default function ReaderPage() {
       });
   }, [bookId]);
 
-  // ── 加载段落 ──────────────────────────────────────
+  // ── 加载段落（不会自动触发翻译） ──────────────
 
   const loadParagraphs = useCallback(
     async (bid: string, sectionId: string, offset: number) => {
@@ -101,18 +101,12 @@ export default function ReaderPage() {
         setTotalParas(result.total);
         setLoadedOffset(offset + result.paragraphs.length);
 
-        // 自动触发预翻译
-        const pending = result.paragraphs.filter(
-          (p) => p.status === "pending" || p.status === "failed",
+        // 不再自动触发预翻译。用户需要先在章节页确认翻译。
+        // 如果已有段落处于 translating 状态，启动轮询
+        const hasActive = result.paragraphs.some(
+          (p) => p.status === "translating"
         );
-        if (pending.length > 0 && !translating) {
-          setTranslating(true);
-          api
-            .preTranslateChapter(sectionId)
-            .then((res) => {
-              if (res.status !== "started") setTranslating(false);
-            })
-            .catch(() => setTranslating(false));
+        if (hasActive) {
           startTranslationPolling(sectionId);
         }
       } catch (err: any) {

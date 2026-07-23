@@ -16,18 +16,22 @@ if (-not (Test-Path ".env")) {
     exit
 }
 
-Write-Host "[1/3] Starting backend (port 8000)..."
+Write-Host "[1/4] Starting backend (port 8000)..."
 $venvPath = Join-Path $PSScriptRoot ".venv\Scripts\Activate.ps1"
 $backendCmd = "cd '$PSScriptRoot'; . '$venvPath'; uvicorn backend.main:app --reload --port 8000"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd -WindowStyle Normal
 
 Start-Sleep -Seconds 4
 
-Write-Host "[2/3] Starting frontend (port 5173)..."
+Write-Host "[2/4] Starting worker (database task queue)..."
+$workerCmd = "cd '$PSScriptRoot'; . '$venvPath'; python -m backend.worker"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $workerCmd -WindowStyle Normal
+
+Write-Host "[3/4] Starting frontend (port 5173)..."
 $frontendCmd = "cd '$PSScriptRoot\frontend'; npm run dev"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd -WindowStyle Normal
 
-Write-Host "[3/3] Opening Chrome..."
+Write-Host "[4/4] Opening Chrome..."
 Start-Sleep -Seconds 2
 $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 if (Test-Path $chrome) {
@@ -42,7 +46,11 @@ Write-Host "  All services started!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Frontend : http://localhost:5173" -ForegroundColor Yellow
 Write-Host "  Backend  : http://localhost:8000" -ForegroundColor Yellow
+Write-Host "  Worker   : database task queue" -ForegroundColor Yellow
 Write-Host "  API Docs : http://localhost:8000/docs" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Note: Worker is required for translation and parsing tasks." -ForegroundColor Yellow
+Write-Host "        Without the worker, jobs will stay 'queued' in the database." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Close the service windows to stop" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Green

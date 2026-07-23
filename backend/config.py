@@ -37,3 +37,61 @@ LLM_CONFIG = {
 
 # 支持的格式
 SUPPORTED_FORMATS = {".pdf", ".epub"}
+
+# ── Public deployment safety limits ──────────────────────
+# 所有限制均可通过环境变量配置
+
+# 上传限制
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+MAX_USER_STORAGE_BYTES = int(os.getenv("MAX_USER_STORAGE_MB", "500")) * 1024 * 1024
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "1000"))
+MAX_EPUB_FILES = int(os.getenv("MAX_EPUB_FILES", "10000"))
+MAX_EPUB_UNCOMPRESSED_BYTES = int(os.getenv("MAX_EPUB_UNCOMPRESSED_MB", "500")) * 1024 * 1024
+MAX_EPUB_COMPRESSION_RATIO = float(os.getenv("MAX_EPUB_COMPRESSION_RATIO", "200"))
+# 单文件解压大小上限 (EPUB内单个文件)
+MAX_EPUB_SINGLE_FILE_BYTES = int(os.getenv("MAX_EPUB_SINGLE_FILE_MB", "50")) * 1024 * 1024
+
+# 翻译字符额度（每用户）
+DAILY_TRANSLATION_CHARS = int(os.getenv("DAILY_TRANSLATION_CHARS", "200000"))
+MONTHLY_TRANSLATION_CHARS = int(os.getenv("MONTHLY_TRANSLATION_CHARS", "2000000"))
+
+# 并发任务限制
+MAX_USER_TRANSLATE_JOBS = int(os.getenv("MAX_USER_TRANSLATE_JOBS", "1"))
+MAX_GLOBAL_TRANSLATE_JOBS = int(os.getenv("MAX_GLOBAL_TRANSLATE_JOBS", "2"))
+
+# 会话
+SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+
+# CORS
+ALLOWED_ORIGINS = [x.strip() for x in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if x.strip()]
+
+# 管理员引导
+BOOTSTRAP_ADMIN_USERNAME = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "admin")
+BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
+
+# API 文档（生产环境建议关闭）
+DOCS_ENABLED = os.getenv("DOCS_ENABLED", "true").lower() == "true"
+
+# 安全响应头
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": os.getenv("SEC_HDR_XCTO", "nosniff"),
+    "X-Frame-Options": os.getenv("SEC_HDR_XFO", "DENY"),
+    "X-XSS-Protection": os.getenv("SEC_HDR_XXSS", "0"),
+    "Referrer-Policy": os.getenv("SEC_HDR_REFERRER", "strict-origin-when-cross-origin"),
+}
+
+# 简单进程内限流（多实例不共享，第一版够用）
+RATE_LIMIT_LOGIN = int(os.getenv("RATE_LIMIT_LOGIN", "5"))       # 次/分钟
+RATE_LIMIT_REGISTER = int(os.getenv("RATE_LIMIT_REGISTER", "3"))  # 次/分钟
+RATE_LIMIT_UPLOAD = int(os.getenv("RATE_LIMIT_UPLOAD", "10"))     # 次/分钟
+RATE_LIMIT_TRANSLATE = int(os.getenv("RATE_LIMIT_TRANSLATE", "5"))# 次/分钟
+RATE_LIMIT_PARSE = int(os.getenv("RATE_LIMIT_PARSE", "3"))        # 次/分钟
+
+# 翻译重试
+TRANSLATE_MAX_RETRIES = int(os.getenv("TRANSLATE_MAX_RETRIES", "3"))
+TRANSLATE_RETRY_BACKOFF = float(os.getenv("TRANSLATE_RETRY_BACKOFF", "2.0"))
+TRANSLATE_API_TIMEOUT = int(os.getenv("TRANSLATE_API_TIMEOUT", "120"))
+
+# 解析超时（秒）
+PARSE_TIMEOUT = int(os.getenv("PARSE_TIMEOUT", "600"))
