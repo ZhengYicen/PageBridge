@@ -5,6 +5,12 @@ export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
     exclude: ["pdfjs-dist"],
+    esbuild: {
+      target: "esnext",
+    },
+  },
+  build: {
+    target: "esnext",
   },
   server: {
     port: 5173,
