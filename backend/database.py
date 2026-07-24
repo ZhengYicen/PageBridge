@@ -148,7 +148,6 @@ CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragra
 CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_para ON paragraph_source_fragments(paragraph_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_page ON paragraph_source_fragments(pdf_page_index);
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 """
 
 
@@ -193,6 +192,10 @@ def init_db():
         # 兼容旧库：旧版本的 users 表以 username 做主键
         # 如果 email 列为空，且 username 列存在，从 username 列同步
         _migrate_username_to_email(conn)
+
+        # email 列的索引（必须在 _add_column 和 _migrate 之后创建，
+        # 否则旧库因 email 列还不存在会报错）
+        _create_email_index_if_needed(conn)
 
         # 启动时恢复中断的任务
         _cleanup_stale_jobs(conn)
@@ -241,6 +244,11 @@ def _migrate_username_to_email(conn):
             "UPDATE users SET email=username WHERE email IS NULL OR email=''"
         )
         logger.info("已从 username 同步 email")
+
+
+def _create_email_index_if_needed(conn):
+    """在 users.email 列上创建索引（旧库加列后调用）。"""
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
 
 
 def source_hash(text: str) -> str:
