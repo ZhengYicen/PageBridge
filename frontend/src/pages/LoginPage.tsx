@@ -111,7 +111,6 @@ export default function LoginPage() {
                   className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="再次输入密码"
                   required
-                  minLength={6}
                 />
               </div>
             )}
