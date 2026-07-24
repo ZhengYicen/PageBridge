@@ -13,13 +13,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export interface User {
-  id: string;
-  username: string;
-  role: string;
-  is_active: boolean;
-}
-
 export interface Book {
   id: string;
   title: string;
@@ -65,11 +58,8 @@ export interface Paragraph {
   paragraph_order: number;
   source_text: string;
   source_html: string;
-  page_number: number;
-  source_bbox: string;
   translation: string;
   status: string;
-  type?: string;
   error_message: string;
   updated_at: string;
 }
@@ -86,7 +76,6 @@ export interface Job {
   created_at: string;
   updated_at: string;
   error_message?: string;
-  reserved_characters?: number;
 }
 
 export interface SourceFragment {
@@ -125,14 +114,7 @@ export interface ReadingSection {
 }
 
 export interface ReaderInfo {
-  book: {
-    id: string;
-    title: string;
-    format: string;
-    total_pages: number;
-    pdf_url: string;
-    parse_status: string;
-  };
+  book: { id: string; title: string; format: string; total_pages: number; pdf_url: string; parse_status: string };
   total_pages: number;
   sections: ReadingSection[];
 }
@@ -145,47 +127,17 @@ export interface PaginatedParagraphs {
   limit: number;
 }
 
-export interface TranslationEstimate {
-  characters: number;
-  daily_used: number;
-  daily_limit: number;
-  daily_remaining: number;
-  monthly_used: number;
-  monthly_limit: number;
-  monthly_remaining: number;
-  reserved_characters: number;
-  allowed: boolean;
-}
-
-export interface UploadLimits {
-  max_file_bytes: number;
-  max_storage_bytes: number;
-  used_storage_bytes: number;
-  max_pdf_pages: number;
-  max_epub_files: number;
-  max_epub_uncompressed_bytes: number;
-  max_epub_single_file_bytes: number;
-  max_epub_compression_ratio: number;
-}
-
 export const api = {
-  // 上传
   upload: async (file: File) => {
     const form = new FormData();
     form.append("file", file);
     const res = await fetch(`${API_BASE}/upload`, {
-      method: "POST",
-      body: form,
-      credentials: "include",
+      method: "POST", body: form, credentials: "include",
     });
     if (!res.ok) throw new Error((await res.json()).detail);
     return res.json();
   },
 
-  // 限制
-  getLimits: () => request<UploadLimits>("/limits"),
-
-  // 书籍
   listBooks: () => request<{ books: Book[] }>("/books"),
   getBook: (id: string) => request<Book>(`/books/${id}`),
   parseBook: (id: string) =>
@@ -193,42 +145,22 @@ export const api = {
   getBookProgress: (id: string) => request<BookProgress>(`/books/${id}/progress`),
   deleteBook: (id: string) => request<{ status: string }>(`/books/${id}`, { method: "DELETE" }),
 
-  // 章节
   getParagraphs: (id: string) =>
     request<{ chapter: Chapter; paragraphs: Paragraph[] }>(`/chapters/${id}/paragraphs`),
-  getTranslationEstimate: (chapterId: string) =>
-    request<TranslationEstimate>(`/chapters/${chapterId}/translation-estimate`),
-  translateChapter: (chapterId: string, confirmed: boolean) =>
+  translateChapter: (chapterId: string) =>
     request<{ job_id: string; chapter_id: string; status: string }>(
-      `/chapters/${chapterId}/translate`,
-      { method: "POST", body: JSON.stringify({ confirmed }) }
+      `/chapters/${chapterId}/translate`, { method: "POST" }
     ),
 
-  // 翻译用量
-  getTranslationUsage: () =>
-    request<{
-      daily_used: number;
-      daily_limit: number;
-      monthly_used: number;
-      monthly_limit: number;
-      reserved_characters: number;
-    }>("/translation/usage"),
-
-  // 任务
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   pauseJob: (id: string) => request<{ status: string }>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: string) => request<{ status: string }>(`/jobs/${id}/resume`, { method: "POST" }),
   retryJob: (id: string) => request<{ status: string }>(`/jobs/${id}/retry`, { method: "POST" }),
 
-  // 翻译状态轮询
   getParagraphTranslations: (chapterId: string) =>
     request<{
-      chapter_id: string;
-      chapter_title: string;
-      translate_status: string;
-      total: number;
-      completed: number;
-      paragraphs: Paragraph[];
+      chapter_id: string; chapter_title: string; translate_status: string;
+      total: number; completed: number; paragraphs: Paragraph[];
     }>(`/paragraphs/${chapterId}/translations`),
 
   subscribeProgress: (jobId: string, onMessage: (data: any) => void) => {
@@ -236,53 +168,15 @@ export const api = {
     es.onmessage = (e) => {
       const data = JSON.parse(e.data);
       onMessage(data);
-      if (["completed", "failed", "partial"].includes(data.status)) {
-        es.close();
-      }
+      if (["completed", "failed", "partial"].includes(data.status)) es.close();
     };
     es.onerror = () => es.close();
     return () => es.close();
   },
 
-  // ── 阅读页 ──
-  getReaderInfo: (bookId: string) =>
-    request<ReaderInfo>(`/books/${bookId}/read`),
-
-  getSectionParagraphs: (
-    bookId: string,
-    sectionId: string,
-    offset = 0,
-    limit = 50,
-  ) =>
+  getReaderInfo: (bookId: string) => request<ReaderInfo>(`/books/${bookId}/read`),
+  getSectionParagraphs: (bookId: string, sectionId: string, offset = 0, limit = 50) =>
     request<PaginatedParagraphs>(
-      `/books/${bookId}/sections/${sectionId}/paragraphs?offset=${offset}&limit=${limit}`,
-    ),
-
-  // ── 管理员 ──
-  listUsers: () =>
-    request<{
-      users: Array<{
-        id: string;
-        username: string;
-        role: string;
-        is_active: number;
-        created_at: string;
-        storage_bytes: number;
-        book_count: number;
-        daily_translation_chars: number;
-        monthly_translation_chars: number;
-      }>;
-    }>("/auth/users"),
-
-  createInvite: (expiresInDays: number) =>
-    request<{ invite_code: string; expires_in_days: number }>(
-      "/auth/invites",
-      { method: "POST", body: JSON.stringify({ expires_in_days: expiresInDays }) }
-    ),
-
-  updateUser: (userId: string, data: { is_active?: boolean }) =>
-    request<{ status: string }>(
-      `/auth/users/${userId}`,
-      { method: "PATCH", body: JSON.stringify(data) }
+      `/books/${bookId}/sections/${sectionId}/paragraphs?offset=${offset}&limit=${limit}`
     ),
 };

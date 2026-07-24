@@ -1,8 +1,7 @@
-"""SQLite 数据库初始化，支持后续迁移到 PostgreSQL（预留 async 接口）"""
+"""SQLite 数据库初始化"""
 
 import logging
 import sqlite3
-import os
 import hashlib
 from pathlib import Path
 
@@ -10,7 +9,6 @@ logger = logging.getLogger("pagebridge.db")
 
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "app.db"
 
-# 建表 SQL — 所有 CREATE TABLE / INDEX 在此统一
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,
@@ -31,10 +29,8 @@ CREATE TABLE IF NOT EXISTS books (
 
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
-    is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -43,23 +39,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS invites (
-    id TEXT PRIMARY KEY,
-    code_hash TEXT NOT NULL UNIQUE,
-    created_by TEXT NOT NULL REFERENCES users(id),
-    used_by TEXT REFERENCES users(id),
-    expires_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS translation_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    job_id TEXT NOT NULL,
-    characters INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -169,8 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_translations_paragraph_id ON translations(paragra
 CREATE INDEX IF NOT EXISTS idx_book_pages_book_id ON book_pages(book_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_para ON paragraph_source_fragments(paragraph_id);
 CREATE INDEX IF NOT EXISTS idx_source_frags_page ON paragraph_source_fragments(pdf_page_index);
-CREATE INDEX IF NOT EXISTS idx_usage_user_created ON translation_usage(user_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_invites_code_hash ON invites(code_hash);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 """
 
 
@@ -190,7 +168,7 @@ def init_db():
     try:
         conn.executescript(CREATE_TABLES_SQL)
 
-        # ── 兼容旧库：渐进式加列 ─────────────────────────
+        # 兼容旧库：渐进式加列
         _add_column_if_missing(conn, "books", "owner_id", "TEXT")
         _add_column_if_missing(conn, "books", "file_size", "INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "books", "total_pages", "INTEGER DEFAULT 0")
@@ -204,15 +182,19 @@ def init_db():
         _add_column_if_missing(conn, "book_pages", "rotation", "INTEGER")
         _add_column_if_missing(conn, "jobs", "book_id", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "jobs", "owner_id", "TEXT DEFAULT ''")
-        _add_column_if_missing(conn, "jobs", "reserved_characters", "INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "jobs", "error_message", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "jobs", "started_at", "TEXT")
 
-        # ── 迁移：为旧书籍设置 owner_id ──────────────────
-        _migrate_old_books_owner(conn)
+        # 兼容旧库（之前多租户版本的 users 表有 username/role/is_active）
+        # 添加 email 列，用于邮箱登录
+        _add_column_if_missing(conn, "users", "email", "TEXT")
+        # 旧表的 role/is_active 保留不动，代码不再依赖
 
-        # ── 启动时恢复中断的任务 ────────────────────────
-        _cleanup_stale_parse_state(conn)
+        # 兼容旧库：旧版本的 users 表以 username 做主键
+        # 如果 email 列为空，且 username 列存在，从 username 列同步
+        _migrate_username_to_email(conn)
+
+        # 启动时恢复中断的任务
         _cleanup_stale_jobs(conn)
 
         conn.commit()
@@ -225,56 +207,17 @@ def init_db():
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_type: str):
-    """兼容旧库：如果列不存在则添加。失败时记录日志但不中断。"""
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     except sqlite3.OperationalError as e:
-        # SQLite 错误代码 1 表示"重复列名"——这是正常情况
         if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
             pass
         else:
             logger.warning("ALTER TABLE %s ADD %s: %s", table, column, e)
 
 
-def _migrate_old_books_owner(conn: sqlite3.Connection):
-    """将 owner_id 为空的旧书籍归属给 bootstrap 管理员（如果存在）。"""
-    null_count = conn.execute(
-        "SELECT COUNT(*) FROM books WHERE owner_id IS NULL"
-    ).fetchone()[0]
-    if null_count == 0:
-        return
-
-    # 找第一个管理员
-    admin = conn.execute(
-        "SELECT id FROM users WHERE role='admin' ORDER BY created_at LIMIT 1"
-    ).fetchone()
-    if admin:
-        conn.execute(
-            "UPDATE books SET owner_id=? WHERE owner_id IS NULL",
-            (admin["id"],)
-        )
-        logger.info("已迁移 %d 本旧书籍归属到管理员 %s", null_count, admin["id"])
-    else:
-        logger.warning(
-            "发现 %d 本旧书籍没有 owner_id，但尚未创建管理员账号。"
-            "引导管理员账号初始化后这些书籍将无法访问，"
-            "请在 bootstrap 后手动迁移。", null_count
-        )
-
-
-def _cleanup_stale_parse_state(conn: sqlite3.Connection):
-    """启动时将残留的 parsing / assembling 状态统一改为 failed"""
-    result = conn.execute(
-        "UPDATE books SET parse_status='failed', current_stage='' "
-        "WHERE parse_status IN ('parsing', 'assembling')"
-    )
-    conn.commit()
-    if result.rowcount:
-        logger.info("恢复了 %d 个中断的解析状态", result.rowcount)
-
-
 def _cleanup_stale_jobs(conn: sqlite3.Connection):
-    """服务重启后，将遗留的 running 状态任务恢复为 queued 或标记中断。"""
+    """服务重启后，将遗留的 running 状态任务恢复为 queued。"""
     result = conn.execute(
         "UPDATE jobs SET status='queued', error_message='recovered after restart', started_at=NULL "
         "WHERE status IN ('running', 'pausing')"
@@ -284,13 +227,27 @@ def _cleanup_stale_jobs(conn: sqlite3.Connection):
         logger.info("恢复了 %d 个中断的任务", result.rowcount)
 
 
+def _migrate_username_to_email(conn):
+    """将旧版 username 字段同步到 email 字段（如果 username 列存在）。"""
+    # 检查 username 列是否存在
+    try:
+        conn.execute("SELECT username FROM users LIMIT 0")
+        has_username = True
+    except sqlite3.OperationalError:
+        has_username = False
+
+    if has_username:
+        conn.execute(
+            "UPDATE users SET email=username WHERE email IS NULL OR email=''"
+        )
+        logger.info("已从 username 同步 email")
+
+
 def source_hash(text: str) -> str:
-    """计算文本的 MD5 哈希，用于翻译缓存查找"""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:
-    """将 sqlite3.Row 转为 dict"""
     if row is None:
         return None
     return dict(row)

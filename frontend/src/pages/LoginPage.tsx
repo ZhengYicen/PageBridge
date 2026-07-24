@@ -6,23 +6,22 @@ export default function LoginPage() {
   const { login, register } = useAuth();
   const navigate = useNavigate();
 
-  // 登录状态
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   // 注册模式
   const [showRegister, setShowRegister] = useState(false);
-  const [inviteCode, setInviteCode] = useState("");
-  const [registerSuccess, setRegisterSuccess] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      await login(username, password);
+      await login(email, password);
       navigate("/");
     } catch (err: any) {
       setError(err.message || "登录失败");
@@ -34,10 +33,14 @@ export default function LoginPage() {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (password !== confirmPassword) {
+      setError("两次密码输入不一致");
+      return;
+    }
     setLoading(true);
     try {
-      await register(username, password, inviteCode);
-      setRegisterSuccess("注册成功！正在跳转...");
+      await register(email, password);
+      setSuccessMsg("注册成功！正在跳转...");
       setTimeout(() => navigate("/"), 1000);
     } catch (err: any) {
       setError(err.message || "注册失败");
@@ -49,7 +52,8 @@ export default function LoginPage() {
   const switchMode = () => {
     setShowRegister(!showRegister);
     setError("");
-    setRegisterSuccess("");
+    setSuccessMsg("");
+    setConfirmPassword("");
   };
 
   return (
@@ -62,65 +66,53 @@ export default function LoginPage() {
 
         <div className="bg-white rounded-2xl shadow-sm border p-6">
           <h2 className="text-lg font-semibold mb-4">
-            {showRegister ? "邀请码注册" : "登录"}
+            {showRegister ? "注册" : "登录"}
           </h2>
 
           {error && (
-            <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg">
-              {error}
-            </div>
+            <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
           )}
-
-          {registerSuccess && (
-            <div className="mb-4 p-3 bg-green-50 text-green-600 text-sm rounded-lg">
-              {registerSuccess}
-            </div>
+          {successMsg && (
+            <div className="mb-4 p-3 bg-green-50 text-green-600 text-sm rounded-lg">{successMsg}</div>
           )}
 
           <form onSubmit={showRegister ? handleRegister : handleLogin} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                用户名
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">邮箱</label>
               <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="输入用户名"
+                placeholder="your@email.com"
                 required
-                minLength={2}
-                maxLength={64}
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                密码
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="输入密码（至少 8 位）"
+                placeholder={showRegister ? "至少 6 位" : "输入密码"}
                 required
-                minLength={8}
+                minLength={showRegister ? 6 : 1}
               />
             </div>
 
             {showRegister && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  邀请码
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">确认密码</label>
                 <input
-                  type="text"
-                  value={inviteCode}
-                  onChange={(e) => setInviteCode(e.target.value)}
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
                   className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="输入邀请码"
+                  placeholder="再次输入密码"
                   required
+                  minLength={6}
                 />
               </div>
             )}
@@ -128,22 +120,17 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className={`w-full py-2 rounded-lg text-sm font-medium transition
-                ${loading
-                  ? "bg-blue-300 text-white cursor-not-allowed"
-                  : "bg-blue-600 text-white hover:bg-blue-700"
-                }`}
+              className={`w-full py-2 rounded-lg text-sm font-medium transition ${
+                loading ? "bg-blue-300 text-white cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700"
+              }`}
             >
               {loading ? "处理中..." : showRegister ? "注册" : "登录"}
             </button>
           </form>
 
           <div className="mt-4 text-center">
-            <button
-              onClick={switchMode}
-              className="text-sm text-blue-600 hover:text-blue-800"
-            >
-              {showRegister ? "已有账号？去登录" : "没有账号？使用邀请码注册"}
+            <button onClick={switchMode} className="text-sm text-blue-600 hover:text-blue-800">
+              {showRegister ? "已有账号？去登录" : "没有账号？注册"}
             </button>
           </div>
         </div>
