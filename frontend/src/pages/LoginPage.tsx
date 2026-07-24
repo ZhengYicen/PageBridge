@@ -96,9 +96,8 @@ export default function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder={showRegister ? "至少 6 位" : "输入密码"}
+                placeholder="输入密码"
                 required
-                minLength={showRegister ? 6 : 1}
               />
             </div>
 

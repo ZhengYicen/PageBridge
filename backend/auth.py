@@ -24,9 +24,9 @@ def normalize_email(email: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    """PBKDF2-SHA256 密码哈希。"""
-    if len(password) < 6:
-        raise ValueError("密码长度至少 6 位")
+    """PBKDF2-SHA256 密码哈希。只拒绝空密码。"""
+    if not password:
+        raise ValueError("密码不能为空")
     salt = os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
     return f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}"

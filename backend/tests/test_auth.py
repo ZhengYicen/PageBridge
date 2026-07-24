@@ -64,11 +64,16 @@ class TestAuth:
     def test_me_unauthenticated(self, client):
         assert client.get("/api/auth/me").status_code == 401
 
-    def test_register_password_too_short(self, client):
+    def test_register_empty_password_rejected(self, client):
         resp = client.post("/api/auth/register", json={
-            "email": "short@test.com", "password": "123",
+            "email": "empty@test.com", "password": "",
         })
         assert resp.status_code in (400, 422)
+        """密码只要非空即可，没有最小长度限制。"""
+        resp = client.post("/api/auth/register", json={
+            "email": "short@test.com", "password": "1",
+        })
+        assert resp.status_code == 200
 
     def test_unauthenticated_cannot_upload(self, client):
         resp = client.post("/api/upload", files={"file": ("test.pdf", b"fake", "application/pdf")})
